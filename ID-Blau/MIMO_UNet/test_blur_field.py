@@ -106,8 +106,30 @@ def test_blur_field(image_path, output_dir, device='cuda'):
     # Forward pass
     outputs = net(input_tensor)
     
-    # Get full resolution output
-    dx, dy, mag = outputs[2]
+    # Debug: Print the output structure
+    print(f"Output type: {type(outputs)}")
+    print(f"Output length: {len(outputs)}")
+    for i, out in enumerate(outputs):
+        print(f"Output[{i}] type: {type(out)}")
+        print(f"Output[{i}] shape: {out.shape if hasattr(out, 'shape') else 'No shape'}")
+    
+    # Assuming the model outputs a list of tensors, and we need to split the channels
+    # Get full resolution output (last in the list)
+    output = outputs[2]  # This should be a tensor with 3 channels
+    
+    # Check if we need to split channels
+    if output.shape[1] == 3:  # If it has 3 channels
+        # Split the channels
+        dx = output[:, 0:1, :, :]
+        dy = output[:, 1:2, :, :]
+        mag = output[:, 2:3, :, :]
+    else:
+        # If it's not what we expected, just use the same tensor for all three
+        # This is just for debugging
+        print(f"Warning: Expected 3 channels but got {output.shape[1]}. Using the same output for all visualizations.")
+        dx = output
+        dy = output
+        mag = output
     
     # Crop to original size
     dx = dx[:, :, :h, :w].clamp(-0.5, 0.5)
