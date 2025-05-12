@@ -26,10 +26,15 @@ def predict(model, args, device):
         dataset_path = os.path.join(args.data_path, val_dataset_name)
 
         dataset = Test_Loader(data_path=dataset_path,
-                                crop_size=args.crop_size,
-                                ZeroToOne=False)
+                              crop_size=args.crop_size,
+                              ZeroToOne=False)
+        
+        # Create output directories
         save_dir = os.path.join(args.dir_path, 'results', f'{val_dataset_name}')
-        os.makedirs(save_dir)
+        os.makedirs(os.path.join(save_dir, 'mag'), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, 'dx'), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, 'dy'), exist_ok=True)
+        
         dataset_len = len(dataset)
         tq = tqdm.tqdm(range(dataset_len))
         tq.set_description(f'Predict {val_dataset_name}')
@@ -38,19 +43,37 @@ def predict(model, args, device):
             sample = dataset[idx]
             input = sample['blur'].unsqueeze(0).to(device)
             b, c, h, w = input.shape
-            factor=8
+            factor = 8
             h_n = (factor - h % factor) % factor
             w_n = (factor - w % factor) % factor
             input = torch.nn.functional.pad(input, (0, w_n, 0, h_n), mode='reflect')
 
-            output = model(input)
-            output = output[2][:, :, :h, :w]
-            output = output.clamp(-0.5, 0.5)
-
+            # Get model outputs (tuples of dx, dy, mag at each scale)
+            outputs = model(input)
+            
+            # Use full resolution output (last in the list)
+            dx, dy, mag = outputs[2]
+            
+            # Crop to original size
+            dx = dx[:, :, :h, :w].clamp(-0.5, 0.5)
+            dy = dy[:, :, :h, :w].clamp(-0.5, 0.5)
+            mag = mag[:, :, :h, :w].clamp(-0.5, 0.5)
+            
+            # Get image name
             image_name = os.path.split(dataset.get_path(idx=idx)['blur_path'])[-1]
-            save_img_path = os.path.join(save_dir, image_name)
-
-            save_image(output.squeeze(0).cpu() + 0.5, save_img_path)
+            base_name = os.path.splitext(image_name)[0]
+            
+            # Save magnitude
+            save_mag_path = os.path.join(save_dir, 'mag', f"{base_name}.png")
+            save_image(mag + 0.5, save_mag_path)
+            
+            # Save dx (displacement in x direction)
+            save_dx_path = os.path.join(save_dir, 'dx', f"{base_name}.png")
+            save_image(dx + 0.5, save_dx_path)
+            
+            # Save dy (displacement in y direction)
+            save_dy_path = os.path.join(save_dir, 'dy', f"{base_name}.png")
+            save_image(dy + 0.5, save_dy_path)
 
 
 

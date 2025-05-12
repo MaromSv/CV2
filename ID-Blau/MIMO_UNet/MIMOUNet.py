@@ -125,7 +125,7 @@ class MIMOUNet(nn.Module):
         z2 = self.SCM2(x_2)
         z4 = self.SCM1(x_4)
 
-        outputs = list()
+        outputs = []
 
         x_ = self.feat_extract[0](x)
         res1 = self.Encoder[0](x_)
@@ -146,23 +146,44 @@ class MIMOUNet(nn.Module):
         res2 = self.AFFs[1](z12, res2, z42)
         res1 = self.AFFs[0](res1, z21, z41)
 
+        # z = self.Decoder[0](z)
+        # z_ = self.ConvsOut[0](z)
+        # z = self.feat_extract[3](z)
+        # outputs.append(z_)
+        # low-res head → 3 channels
         z = self.Decoder[0](z)
-        z_ = self.ConvsOut[0](z)
-        z = self.feat_extract[3](z)
-        outputs.append(z_+x_4)
+        out3 = self.feat_extract[3](z)      # [B, C3, H/4, W/4]
+        tmp3 = self.ConvsOut[0](out3)       # [B,3,H/4,W/4]
+        dx3, dy3, m3 = tmp3[:,0:1], tmp3[:,1:2], tmp3[:,2:3]
+        outputs.append((dx3,dy3,m3))
 
-        z = torch.cat([z, res2], dim=1)
+        # z = torch.cat([z, res2], dim=1)
+        # z = self.Convs[0](z)
+        # z = self.Decoder[1](z)
+        # z_ = self.ConvsOut[1](z)
+        # z = self.feat_extract[4](z)
+        # outputs.append(z_)
+        # mid-res head → 3 channels
+        z = torch.cat([out3, res2], dim=1)
         z = self.Convs[0](z)
         z = self.Decoder[1](z)
-        z_ = self.ConvsOut[1](z)
-        z = self.feat_extract[4](z)
-        outputs.append(z_+x_2)
+        out2 = self.feat_extract[4](z)      # [B,C3,H/2,W/2]
+        tmp2 = self.ConvsOut[1](out2)       # [B,3,H/2,W/2]
+        dx2, dy2, m2 = tmp2[:,0:1], tmp2[:,1:2], tmp2[:,2:3]
+        outputs.append((dx2,dy2,m2))
 
-        z = torch.cat([z, res1], dim=1)
+        # z = torch.cat([z, res1], dim=1)
+        # z = self.Convs[1](z)
+        # z = self.Decoder[2](z)
+        # z = self.feat_extract[5](z)
+        # outputs.append(z)
+        # full-res head → 3 channels
+        z = torch.cat([out2, res1], dim=1)
         z = self.Convs[1](z)
         z = self.Decoder[2](z)
-        z = self.feat_extract[5](z)
-        outputs.append(z+x)
+        tmp1 = self.feat_extract[5](z)      # [B,3,H,W]
+        dx1, dy1, m1 = tmp1[:,0:1], tmp1[:,1:2], tmp1[:,2:3]
+        outputs.append((dx1,dy1,m1))
 
         return outputs
 
@@ -250,20 +271,20 @@ class MIMOUNetPlus(nn.Module):
         z = self.Decoder[0](z)
         z_ = self.ConvsOut[0](z)
         z = self.feat_extract[3](z)
-        outputs.append(z_+x_4)
+        outputs.append(z_)
 
         z = torch.cat([z, res2], dim=1)
         z = self.Convs[0](z)
         z = self.Decoder[1](z)
         z_ = self.ConvsOut[1](z)
         z = self.feat_extract[4](z)
-        outputs.append(z_+x_2)
+        outputs.append(z_)
 
         z = torch.cat([z, res1], dim=1)
         z = self.Convs[1](z)
         z = self.Decoder[2](z)
         z = self.feat_extract[5](z)
-        outputs.append(z+x)
+        outputs.append(z)
 
         return outputs
 
