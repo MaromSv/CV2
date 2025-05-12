@@ -1,14 +1,12 @@
 # DPT_blur: Pixel-Wise Blur Quantification using Dense Prediction Transformers
 
-This directory contains code for **DPT_blur**, a model adapted from the Dense Prediction Transformer (DPT) architecture, originally designed for tasks like depth estimation. Here, the model has been repurposed to **predict pixel-wise blur vectors** from a single input blurred image.
-
-The goal is to quantify the motion blur at each pixel, potentially estimating both its **magnitude** and **direction**. This information can be valuable for various computer vision tasks, including blur removal, understanding scene dynamics, or synthesizing realistic blur effects.
+This directory contains code for **DPT_blur**, a model adapted from the Dense Prediction Transformer (DPT) architecture, originally designed for tasks like depth estimation and segmentation. Here, the model has been repurposed to **predict pixel-wise blur vectors** from a single input blurred image. The goal is to quantify the motion blur at each pixel, potentially estimating both its **magnitude** and **orientation**.
 
 ## Directory Structure & Key Scripts
 
-*   `dpt_lib/`: Contains the core implementation of the modified DPT model architecture.
+*   `dpt_lib/`: Contains the core implementation of the modified DPT model architecture, derived from a subset of the original DPT repository.
 *   `weights/`: Intended location for storing pre-trained model weights.
-*   `train_dpt_blur.py`: Script used for training the DPT_blur model. It likely handles data loading, model optimization, and saving checkpoints.
+*   `train_dpt_blur.py`: Script used for training the DPT_blur model. It handles data loading, model optimization, and saving checkpoints.
 *   `run_dpt_blur_quantification.py`: Script to run inference using a trained DPT_blur model on input images to generate blur maps/vector fields.
 *   `visualize_blur_map.py`: Utility script for visualizing the predicted blur information (e.g., as heatmaps or quiver plots).
 *   `results/`: Default directory for saving output blur maps or visualizations.
@@ -16,11 +14,7 @@ The goal is to quantify the motion blur at each pixel, potentially estimating bo
 
 ## Integration Context
 
-This module is part of the larger `CV2` repository. It complements other efforts, such as the `ID-Blau` dataset generation, by providing a method to *predict* blur characteristics from images, whereas `ID-Blau` focuses on *generating* synthetically blurred images with ground truth blur information for training.
-
-## Usage Example
-
-Please refer to the `showcase_dpt_blur.ipynb` notebook in this directory for a practical example of loading the model and running it on test images.
+This repo provides a model and method to *predict* blur characteristics from images, whereas `ID-Blau` focuses on *generating* synthetically blurred images with ground truth blur information for training.
 
 ## Setup
 
@@ -35,7 +29,7 @@ Please refer to the `showcase_dpt_blur.ipynb` notebook in this directory for a p
 
 ## Ground Truth Data (for Training)
 
-The `train_dpt_blur.py` script expects ground truth data to be provided as `.npy` files.
+IN PROGRESS: The `train_dpt_blur.py` script expects ground truth data to be provided as `.npy` files.
 
 *   **Format:** Each `.npy` file should correspond to a training image and contain a NumPy array of shape `(2, H, W)`.
 *   **Representation:** The script currently includes a placeholder to convert data stored as `(Magnitude, Angle_in_Radians)` in the `.npy` file into the `(bx, by)` format needed for training. 
@@ -53,7 +47,6 @@ The `train_dpt_blur.py` script expects ground truth data to be provided as `.npy
         --output_file DPT_blur/outputs/example_blur_vector.pt \
         --print_shapes
     ```
-    *(You might need to `mkdir DPT_blur/outputs` first)*
 
 2.  **Visualize Output:**
     ```bash
