@@ -23,189 +23,11 @@ try:
 except ImportError as e:
     print("Error: Could not import local DPT library (dpt_lib). Make sure it exists in the same directory as the script.")
 
-# --- Dataset Definition ---
+# --- Import Dataset Class ---
+from data_loader import BlurMapDataset
 
-class BlurMapDataset(Dataset):
-    """Dataset for loading blurred images and their corresponding blur map ground truth."""
-    def __init__(self, blurred_dir, gt_dir, transform=None, target_transform=None):
-        self.blurred_dir = blurred_dir
-        self.gt_dir = gt_dir
-        self.transform = transform
-        self.target_transform = target_transform
-
-        self.image_files = sorted(glob.glob(os.path.join(blurred_dir, '*.png'))) \
-                         + sorted(glob.glob(os.path.join(blurred_dir, '*.jpg'))) \
-                         + sorted(glob.glob(os.path.join(blurred_dir, '*.jpeg')))
-
-        if not self.image_files:
-            raise FileNotFoundError(f"No image files found in {blurred_dir}")
-
-        print(f"Found {len(self.image_files)} potential image files.")
-        # TODO: Consider pre-filtering image_files list here based on existing GT files
-        # self.image_files = self._pre_filter_pairs(self.image_files, self.gt_dir)
-        # print(f"Found {len(self.image_files)} valid image/GT pairs.")
-
-    # Optional pre-filtering method
-    # def _pre_filter_pairs(self, image_files, gt_dir):
-    #     valid_files = []
-    #     for img_path in image_files:
-    #         base_name = os.path.splitext(os.path.basename(img_path))[0]
-    #         gt_path = os.path.join(gt_dir, base_name + '.npy')
-    #         if os.path.exists(gt_path):
-    #             valid_files.append(img_path)
-    #     return valid_files
-
-    def __len__(self):
-        return len(self.image_files)
-
-    def __getitem__(self, idx):
-        img_path = self.image_files[idx]
-        base_name = os.path.splitext(os.path.basename(img_path))[0]
-        gt_path = os.path.join(self.gt_dir, base_name + '.npy')
-
-        if not os.path.exists(gt_path):
-            # This path should ideally not be hit if pre-filtering is done
-            print(f"Warning: GT not found for {img_path} (Index {idx}). Returning None.")
-            return None # Signal to filter this out later
-
-        # Load image
-        try:
-            image = cv2.imread(img_path)
-            if image is None: raise IOError(f"imread failed for {img_path}")
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            image = image.astype(np.float32)
-        except Exception as e:
-             print(f"Error loading image {img_path}: {e}. Returning None.")
-             return None
-
-        # --- Ground Truth Loading and Processing --- 
-        try:
-            # TODO: This section is DEPENDENT on the final GT format.
-            # Adapt the loading and conversion based on how GT is stored.
-
-            # --- Placeholder Example: Assumes GT is (Mag, Angle_Radians) --- 
-            gt_map_mag_angle = np.load(gt_path).astype(np.float32)
-            if gt_map_mag_angle.shape[0] != 2:
-                raise ValueError(f"Expected GT shape (2, H, W), got {gt_map_mag_angle.shape}")
-            
-            print(f"DEBUG: Converting GT {base_name}.npy from (Mag, Angle) -> (bx, by)")
-            magnitude = gt_map_mag_angle[0, :, :]
-            angle_rad = gt_map_mag_angle[1, :, :] # Make sure this is in RADIANS
-            bx = magnitude * np.cos(angle_rad)
-            by = magnitude * np.sin(angle_rad)
-            gt_map_xy = np.stack((bx, by), axis=0)
-            # --- End Placeholder Example --- 
-
-            # TODO: If your GT is ALREADY stored as (bx, by), replace the above with:
-            # gt_map_xy = np.load(gt_path).astype(np.float32)
-            # if gt_map_xy.shape[0] != 2:
-            #     raise ValueError(f"Expected GT shape (2, H, W) for (bx, by), got {gt_map_xy.shape}")
-
-        except Exception as e:
-             print(f"Error loading/processing ground truth {gt_path}: {e}. Returning None.")
-             return None
-        # --- End Ground Truth Section ---
-
-        # Apply input image transforms
-        if self.transform:
-            sample = {"image": image}
-            transformed_sample = self.transform(sample)
-            image_tensor = transformed_sample["image"]
-        else:
-            image_tensor = TF.to_tensor(image)
-
-        # Resize GT map (bx, by) to match transformed input size
-        gt_tensor = torch.from_numpy(gt_map_xy).unsqueeze(0)
-        target_size = image_tensor.shape[1:]
-        gt_resized_tensor = TF.interpolate(gt_tensor, size=target_size, mode='bilinear', align_corners=False)
-        gt_resized_tensor = gt_resized_tensor.squeeze(0)
-
-        # Apply optional target transforms (e.g., normalization)
-        if self.target_transform:
-             gt_resized_tensor = self.target_transform(gt_resized_tensor)
-
-        return image_tensor, gt_resized_tensor
-
-# --- Model Creation ---
-
-def create_dpt_blur_model(output_channels=2, model_type="dpt_hybrid", pretrained_weights_path=None):
-    """Creates the DPT model, loads pre-trained weights, replaces the head."""
-
-    print(f"Creating DPT model (type: {model_type}) for {output_channels}-channel output.")
-
-    # Determine backbone and features
-    if model_type == "dpt_large":
-        backbone = "vitl16_384"
-        features = 256
-    elif model_type == "dpt_hybrid":
-        backbone = "vitb_rn50_384"
-        features = 256
-    else:
-        raise ValueError(f"Unsupported model_type: {model_type}")
-
-    # Create base DPT model with a dummy head
-    model = DPT(head=nn.Identity(), backbone=backbone, features=features, use_bn=True)
-
-    # Load pre-trained weights for the BACKBONE if path is provided
-    if pretrained_weights_path:
-        print(f"Loading pre-trained BACKBONE weights from: {pretrained_weights_path}")
-        if not os.path.exists(pretrained_weights_path):
-             raise FileNotFoundError(f"Pretrained weights not found at {pretrained_weights_path}")
-
-        checkpoint = torch.load(pretrained_weights_path, map_location="cpu")
-        if "state_dict" in checkpoint:
-            state_dict = {k.replace("module.", ""): v for k, v in checkpoint["state_dict"].items()}
-        else:
-            state_dict = checkpoint
-
-        # Filter out segmentation head and aux layer weights
-        filtered_state_dict = {}
-        for k, v in state_dict.items():
-            if not k.startswith("scratch.output_conv.") and not k.startswith("auxlayer."):
-                filtered_state_dict[k] = v
-
-        missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
-        print("Pre-trained backbone weights loaded.")
-        # Print warnings for unexpected issues during backbone loading
-        if unexpected_keys:
-             print(f"  Warning: Unexpected keys during backbone weight load: {unexpected_keys}")
-        if missing_keys and any(not k.startswith("scratch.output_conv.") for k in missing_keys):
-             print(f"  Warning: Missing non-head keys during backbone weight load: {[k for k in missing_keys if not k.startswith('scratch.output_conv.')]}")
-
-    else:
-        print("Warning: No pre-trained backbone weights path provided.")
-
-    # Freeze backbone parameters (ensure this runs AFTER potential backbone loading)
-    print("Freezing backbone parameters...")
-    num_frozen = 0
-    for name, param in model.named_parameters():
-        if not name.startswith("scratch.output_conv."): # Keep head unfrozen
-            param.requires_grad = False
-            num_frozen += 1
-        else:
-             param.requires_grad = True # Ensure head is trainable
-             # print(f"  - Parameter unfrozen (part of head): {name}") # Optional: verbose
-    print(f"Froze {num_frozen} parameters in the backbone.")
-
-    # Replace the head with a new regression head
-    model.scratch.output_conv = nn.Sequential(
-            nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(features // 2),
-            nn.ReLU(True),
-            nn.Conv2d(features // 2, 32, kernel_size=3, stride=1, padding=1, bias=False),
-            nn.BatchNorm2d(32),
-            nn.ReLU(True),
-            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0)
-        )
-    print(f"Initialized new model head for {output_channels}-channel regression.")
-
-    # Verify trainable parameters
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total_params = sum(p.numel() for p in model.parameters())
-    print(f"Total parameters: {total_params:,}")
-    print(f"Trainable head parameters: {trainable_params:,}")
-
-    return model
+# --- Import Model Creation Utility ---
+from model_utils import create_dpt_blur_model
 
 # --- Training Function ---
 
@@ -396,8 +218,8 @@ if __name__ == "__main__":
     # Datasets
     print("Setting up datasets...")
     try:
-        train_dataset_full = BlurMapDataset(args.blurred_dir_train, args.gt_dir_train, transform=dpt_transform, target_transform=target_transform)
-        val_dataset_full = BlurMapDataset(args.blurred_dir_val, args.gt_dir_val, transform=dpt_transform, target_transform=target_transform)
+        train_dataset_full = BlurMapDataset(args.blurred_dir_train, args.gt_dir_train, transform=dpt_transform, target_transform=target_transform, crop_size=args.img_size, is_train=True)
+        val_dataset_full = BlurMapDataset(args.blurred_dir_val, args.gt_dir_val, transform=dpt_transform, target_transform=target_transform, crop_size=None, is_train=False)
     except FileNotFoundError as e:
         print(f"Error initializing dataset: {e}")
         exit()
@@ -421,7 +243,8 @@ if __name__ == "__main__":
     model = create_dpt_blur_model(
         output_channels=args.output_channels,
         model_type=args.model_type,
-        pretrained_weights_path=args.weights # Pass backbone weights path
+        pretrained_weights_path=args.weights, # Pass backbone weights path
+        freeze_backbone=True # Explicitly set freeze_backbone, can be an arg if needed
     )
     model.to(device)
 
