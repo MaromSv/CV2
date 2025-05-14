@@ -1,6 +1,13 @@
 import torch
 import torch.nn as nn
 import os
+# from .dpt_lib.blocks import Interpolate # Original problematic import
+
+# Try relative import first, then direct if run as script
+try:
+    from .dpt_lib.blocks import Interpolate
+except ImportError:
+    from dpt_lib.blocks import Interpolate
 
 # Import DPT model from dpt_lib
 try:
@@ -95,10 +102,10 @@ def create_dpt_blur_model(output_channels=3, model_type="dpt_hybrid", pretrained
             # Keep the head (output_conv) unfrozen, freeze everything else.
             if not name.startswith("scratch.output_conv."):
                 param.requires_grad = False
-                num_frozen += 1
+                num_frozen += param.numel()
             else:
                  param.requires_grad = True # Ensure new head is trainable
-        print(f"Froze {num_frozen} parameters in the DPT backbone.")
+        print(f"Froze {num_frozen:,} parameters in the DPT backbone.")
     else:
         print("DPT backbone parameters will remain trainable.")
 
@@ -113,8 +120,8 @@ def create_dpt_blur_model(output_channels=3, model_type="dpt_hybrid", pretrained
             nn.Conv2d(features // 2, 32, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(True),
-            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0) # Output bx, by, magnitude
-            # No final activation like Sigmoid/Tanh unless your GT is normalized to a specific range
+            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0),
+            Interpolate(scale_factor=2, mode="bilinear", align_corners=True) # Output bx, by, magnitude
         )
     print(f"Initialized new model head for {output_channels}-channel regression.")
 
@@ -123,6 +130,7 @@ def create_dpt_blur_model(output_channels=3, model_type="dpt_hybrid", pretrained
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters in DPT model: {total_params:,}")
     print(f"Trainable parameters (mostly head): {trainable_params:,}")
+    print(f"Percentage of trainable parameters: {trainable_params / total_params * 100:.2f}%")
 
     return model
 
@@ -140,7 +148,7 @@ if __name__ == '__main__':
 
         # Test Large
         print("\n--- Testing DPT Large ---")
-        model_large = create_dpt_blur_model(model_type="dpt_large", pretrained_weights_path=None, freeze_backbone=False, output_channels=3)
+        model_large = create_dpt_blur_model(model_type="dpt_large", pretrained_weights_path='weights/dpt_large-ade20k-b12dca68.pt', freeze_backbone=True, output_channels=3)
         dummy_input_large = torch.randn(1, 3, 384, 384)
         output_large = model_large(dummy_input_large)
         print(f"Large model output shape: {output_large.shape}")

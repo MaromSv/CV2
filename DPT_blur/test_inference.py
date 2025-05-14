@@ -125,33 +125,36 @@ def run_dpt_blur_prediction(tensor, model_path, output_channels=3, model_type="d
     model.to(device)
 
     # Process the tensor
-    original_shape = tensor.shape[2:] # Store H, W
+    # The input `tensor` is expected to be preprocessed and in the correct shape (B, C, H, W)
+    # If it's coming directly from an image file, preprocessing would happen before calling this function.
+    input_tensor = tensor.to(device)
+    original_shape = input_tensor.shape[2:] # Store H, W of the input tensor
+
     with torch.no_grad():
-        # Preprocessing
-        img_np = tensor.squeeze(0).permute(1, 2, 0).cpu().detach().numpy()
-        img_transformed = transform({"image": img_np})["image"]
-        sample = torch.from_numpy(img_transformed).to(device).unsqueeze(0)
+        # The DPT transforms (Resize, NormalizeImage, PrepareForNet) are typically applied
+        # to the input *before* it becomes the `tensor` argument to this function.
+        # Here, we assume `tensor` is already the output of `PrepareForNet`.
+        sample = input_tensor # Already a tensor (B, C, H, W)
 
         if print_shapes: print(f"Input tensor shape: {sample.shape}")
 
         if optimize and (device == torch.device("cuda") or device == torch.device("mps")):
             # Check if model attributes channels_last to avoid errors if format conversion failed
-            if hasattr(model, 'channels_last') and model.channels_last: 
-                sample = sample.to(memory_format=torch.channels_last)
+            if hasattr(model, 'channels_last') and model.channels_last:
+                 sample = sample.to(memory_format=torch.channels_last)
             # if device == torch.device("cuda"): 
             #    sample = sample.half()
 
         # --- DPT Forward Pass --- 
-        # Directly call the model's forward method
         if print_shapes: print("Running model.forward()...")
         raw_output = model.forward(sample) # Shape (B, output_channels, H_feat, W_feat)
         if print_shapes: print(f"  Model output (raw, before interpolate): {raw_output.shape}")
         # ------------------------
 
-        # Resize back to original input size
+        # Resize back to original input tensor's size (which might be different from original image if resized by transform)
         prediction = F.interpolate(
             raw_output,
-            size=original_shape,  # Resize to original H, W
+            size=original_shape,  # Resize to original H, W of the *input tensor*
             mode="bilinear",
             align_corners=False
         )
@@ -163,21 +166,62 @@ if __name__ == "__main__":
     import numpy as np
     import argparse
 
-    parser = argparse.ArgumentParser(description="Run DPT model for blur quantification.")
-    parser.add_argument('--weights', type=str, default="weights/dpt_large-ade20k-b12dca68.pt", help='Path to pre-trained DPT weights (.pt file).')
+    parser = argparse.ArgumentParser(description="Run DPT model for blur quantification on an image.")
+    parser.add_argument('--image_path', type=str, default='data/GOPRO_Large/test/GOPR0384_11_00/blur/000001.png', help='Path to the input image file.')
+    parser.add_argument('--weights', type=str, default="weights/dpt_large-ade20k-b12dca68.pt", help='Path to pre-trained DPT model weights (.pt file).')
     parser.add_argument('--model_type', type=str, default='dpt_large', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
-    parser.add_argument('--img_h', type=int, default=256, help='Height of the input random tensor.')
-    parser.add_argument('--img_w', type=int, default=256, help='Width of the input random tensor.')
     parser.add_argument('--output_file', type=str, default='results/output_blur_map.pt', help='Path to save the output blur map tensor.')
     parser.add_argument('--print_shapes', action='store_true', help='Print model layer shapes during inference.')
     parser.add_argument('--no_optimize', action='store_true', help='Disable optimizations (memory format).')
     args = parser.parse_args()
 
-    # Create a random tensor
-    random_tensor = torch.randn(1, 3, args.img_h, args.img_w)
-    print(f"Created random input tensor of shape: {random_tensor.shape}")
+    # Check if image file exists
+    if not os.path.exists(args.image_path):
+        print(f"Error: Image file not found at {args.image_path}")
+        exit()
+    else:
+        print(f"Loading image from {args.image_path}")
 
-    # Check if model file exists
+    # Load and preprocess the image
+    try:
+        img_np = cv2.imread(args.image_path) # BGR, HWC, uint8
+        if img_np is None:
+            raise IOError(f"Failed to read image from {args.image_path}")
+        img_np = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB) # RGB, HWC, uint8
+        img_np = img_np.astype(np.float32) # RGB, HWC, float32
+    except Exception as e:
+        print(f"Error loading or processing image {args.image_path}: {e}")
+        exit()
+
+    # Define the DPT transforms (same as used in training and visualization_helpers if any)
+    # Note: The target size 384, 384 might need to match what the model expects or was trained on.
+    # If the model has a fixed input size, this resize is crucial.
+    # For DPT, common input sizes are 384x384 or 512x512.
+    net_w, net_h = 384, 384 # Example, adjust if your DPT model expects different input size
+    if args.model_type == "dpt_large": # Typically 384x384 or 512x512 for ViT-L
+        net_w, net_h = 384, 384
+    elif args.model_type == "dpt_hybrid": # Typically 384x384 for ViT-B based hybrids
+        net_w, net_h = 384, 384
+
+    dpt_transform = Compose([
+        Resize(
+            net_w, net_h,
+            resize_target=None, # Resize the image itself
+            keep_aspect_ratio=True,
+            ensure_multiple_of=32, # DPT requirement
+            resize_method="minimal", # Method might be less critical if keep_aspect_ratio is False
+            image_interpolation_method=cv2.INTER_CUBIC,
+        ),
+        NormalizeImage(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]), # Standard DPT normalization
+        PrepareForNet(), # Converts to CHW tensor and permutes
+    ])
+
+    # Apply transforms to the loaded image
+    transformed_sample = dpt_transform({"image": img_np}) # Expects dict, returns dict
+    input_tensor = torch.from_numpy(transformed_sample["image"]).unsqueeze(0) # Add batch dimension (B, C, H, W)
+    print(f"Processed input tensor of shape: {input_tensor.shape}")
+
+    # Check if model weights file exists
     if not os.path.exists(args.weights):
         print(f"Error: Model weights not found at {args.weights}")
         print("Please download the weights or provide the correct path.")
@@ -186,8 +230,8 @@ if __name__ == "__main__":
         print(f"Found model weights at {args.weights}")
 
     # Run blur prediction
-    blur_vector_predictions = run_dpt_blur_prediction(
-        random_tensor,
+    blur_predictions = run_dpt_blur_prediction(
+        input_tensor, # Use the processed image tensor
         model_path=args.weights,
         output_channels=3, # Must be 3 for (bx, by, magnitude)
         model_type=args.model_type,
@@ -201,10 +245,10 @@ if __name__ == "__main__":
         os.makedirs(output_dir, exist_ok=True)
 
     # Save the output tensor (only the first item in the batch)
-    output_tensor_to_save = blur_vector_predictions[0].cpu() # Move to CPU before saving
+    output_tensor_to_save = blur_predictions[0].cpu() # Move to CPU before saving
     try:
         torch.save(output_tensor_to_save, args.output_file)
-        print(f"Output blur vector map saved to: {args.output_file}")
-        print(f"Saved tensor shape: {output_tensor_to_save.shape}") # Should be (3, H, W)
+        print(f"Output blur map saved to: {args.output_file}")
+        print(f"Saved tensor shape: {output_tensor_to_save.shape}") # Should be (3, H_processed, W_processed)
     except Exception as e:
         print(f"Error saving output tensor to {args.output_file}: {e}") 

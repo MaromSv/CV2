@@ -12,9 +12,9 @@ class BlurMapDataset(Dataset):
     Dataset for loading blurred images and their corresponding blur map ground truth.
 
     Loads image-ground_truth pairs and applies transformations.
-    Includes optional random cropping for training augmentation.
+    Includes optional random cropping and random horizontal flip for training augmentation.
     """
-    def __init__(self, blurred_dir, gt_dir, transform=None, target_transform=None, crop_size=None, is_train=False):
+    def __init__(self, blurred_dir, gt_dir, transform=None, target_transform=None, crop_size=None, is_train=False, random_flip=False):
         """
         Args:
             blurred_dir (str): Directory containing blurred input images (.png, .jpg, .jpeg).
@@ -29,6 +29,7 @@ class BlurMapDataset(Dataset):
             is_train (bool, optional): If True, enables random cropping (if crop_size is set) and potentially
                                        other training-specific augmentations within the transform pipeline.
                                        Defaults to False.
+            random_flip (bool, optional): If True and is_train is True, enables random horizontal flipping.
         """
         self.blurred_dir = blurred_dir
         self.gt_dir = gt_dir
@@ -36,32 +37,44 @@ class BlurMapDataset(Dataset):
         self.target_transform = target_transform
         self.crop_size = crop_size
         self.is_train = is_train
+        self.random_flip = random_flip
 
-        # Find all image files in the directory
-        self.image_files = sorted(glob.glob(os.path.join(blurred_dir, '*.png'))) \
-                         + sorted(glob.glob(os.path.join(blurred_dir, '*.jpg'))) \
-                         + sorted(glob.glob(os.path.join(blurred_dir, '*.jpeg')))
+        # Find all image files in the directory, searching recursively in 'blur' subfolders
+        self.image_files = []
+        extensions = ['png', 'jpg', 'jpeg']
+        for ext in extensions:
+            # Pattern to find images in any 'blur' subdirectory under the main blurred_dir
+            # e.g., blurred_dir/scene_name/blur/image.png
+            pattern = os.path.join(self.blurred_dir, '**', 'blur', f'*.{ext}')
+            self.image_files.extend(sorted(glob.glob(pattern, recursive=True)))
+        
+        # Ensure the list is sorted for reproducibility if multiple extensions are mixed
+        self.image_files.sort()
 
         if not self.image_files:
-            raise FileNotFoundError(f"No image files found in {blurred_dir}")
+            # More specific error message
+            raise FileNotFoundError(f"No image files found in '**/blur/' subdirectories under {self.blurred_dir}")
 
-        print(f"Found {len(self.image_files)} potential image files.")
+        print(f"Found {len(self.image_files)} image files in '**/blur/' subdirectories.")
 
-        # TODO (Optional Pre-filtering):
-        # Consider implementing pre-filtering to ensure only images with corresponding
-        # GT files are included in self.image_files for efficiency.
-        # self.image_files = self._pre_filter_pairs(self.image_files, self.gt_dir)
-        # print(f"Found {len(self.image_files)} valid image/GT pairs.")
+        # Optional Pre-filtering (can be enabled if gt_dir structure is complex or for verification)
+        # For now, we assume gt_path construction in __getitem__ is robust.
+        # self.image_files = self._pre_filter_pairs(self.image_files, self.gt_dir, self.blurred_dir)
+        # print(f"Found {len(self.image_files)} valid image/GT pairs after pre-filtering.")
 
-    # Optional pre-filtering method skeleton
-    # def _pre_filter_pairs(self, image_files, gt_dir):
+    # Optional pre-filtering method skeleton (updated for relpath)
+    # def _pre_filter_pairs(self, image_files, gt_dir, blurred_base_dir):
     #     valid_files = []
     #     print("Pre-filtering image/GT pairs...")
-    #     for img_path in tqdm(image_files):
-    #         base_name = os.path.splitext(os.path.basename(img_path))[0]
-    #         gt_path = os.path.join(gt_dir, base_name + '.npy')
-    #         if os.path.exists(gt_path):
-    #             valid_files.append(img_path)
+    #     for img_path in tqdm(image_files): # tqdm needs to be imported if used
+    #         try:
+    #             relative_img_path = os.path.relpath(img_path, blurred_base_dir)
+    #             gt_relative_path = os.path.splitext(relative_img_path)[0] + '.npy'
+    #             gt_path = os.path.join(gt_dir, gt_relative_path)
+    #             if os.path.exists(gt_path):
+    #                 valid_files.append(img_path)
+    #         except Exception as e:
+    #             print(f"Error during pre-filtering for {img_path}: {e}")
     #     return valid_files
 
     def __len__(self):
@@ -83,10 +96,21 @@ class BlurMapDataset(Dataset):
             None: If any error occurs during loading, processing, or if filtering is needed.
         """
         img_path = self.image_files[idx]
-        base_name = os.path.splitext(os.path.basename(img_path))[0]
-        gt_path = os.path.join(self.gt_dir, base_name + '.npy')
 
-        # Check if GT file exists (redundant if pre-filtering is implemented)
+        # Construct GT path based on relative path from blurred_dir
+        try:
+            relative_img_path = os.path.relpath(img_path, self.blurred_dir)
+            # e.g., if blurred_dir is 'data/train' and img_path is 'data/train/scene1/blur/img.png',
+            # relative_img_path will be 'scene1/blur/img.png'
+            gt_relative_base = os.path.splitext(relative_img_path)[0]
+            # e.g., 'scene1/blur/img'
+            gt_path = os.path.join(self.gt_dir, gt_relative_base + '.npy')
+            # e.g., gt_dir/scene1/blur/img.npy
+        except Exception as e:
+            print(f"Error constructing GT path for {img_path} relative to {self.blurred_dir}: {e}. Returning None.")
+            return None
+
+        # Check if GT file exists
         if not os.path.exists(gt_path):
             print(f"Warning: GT not found for {img_path} (Index {idx}). Returning None.")
             return None
@@ -121,12 +145,12 @@ class BlurMapDataset(Dataset):
 
             # Basic check for dimension consistency
             if H_orig != H_gt or W_orig != W_gt:
-                print(f"Warning: Mismatch in original image ({H_orig}x{W_orig}) and GT ({H_gt}x{W_gt}) dimensions for {base_name}. Skipping.")
+                print(f"Warning: Mismatch in original image ({H_orig}x{W_orig}) and GT ({H_gt}x{W_gt}) dimensions for {relative_img_path}. Skipping.")
                 return None
 
             # Check if image is large enough for cropping
             if H_orig < self.crop_size or W_orig < self.crop_size:
-                print(f"Warning: Image {base_name} ({H_orig}x{W_orig}) is smaller than crop size ({self.crop_size}). Skipping.")
+                print(f"Warning: Image {relative_img_path} ({H_orig}x{W_orig}) is smaller than crop size ({self.crop_size}). Skipping.")
                 return None
 
             # Calculate random top-left corner for the crop
@@ -136,6 +160,13 @@ class BlurMapDataset(Dataset):
             # Perform the crop on both image and GT map
             image = image[top : top + self.crop_size, left : left + self.crop_size, :] # HWC
             gt_blur_map = gt_blur_map[:, top : top + self.crop_size, left : left + self.crop_size] # CHW
+
+        # --- Random Horizontal Flip (for training, applied to both image and GT) ---
+        if self.is_train and self.random_flip and random.random() < 0.5:
+            image = cv2.flip(image, 1) # HWC
+            gt_blur_map = np.ascontiguousarray(gt_blur_map[:, :, ::-1]) # CHW, flip horizontally (axis 2)
+            # For bx (channel 0 of gt_blur_map), its sign needs to be inverted after a horizontal flip
+            gt_blur_map[0, :, :] *= -1
 
         # --- Apply Input Image Transforms ---
         # The transform pipeline (e.g., dpt_transform) should handle:

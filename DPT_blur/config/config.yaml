@@ -1,0 +1,112 @@
+# DPT Blur Quantification Project Configuration
+
+# General Settings
+project_name: "DPT_Blur_Quantification"
+# Choose implementation: 'dpt_lib' or 'huggingface'
+implementation: 'huggingface' # Or 'dpt_lib'
+
+# Device Configuration
+# Options: "auto", "cuda", "mps", "cpu"
+# "auto" will prioritize CUDA > MPS > CPU
+device: "auto"
+
+# Model Configuration
+model:
+  # For 'dpt_lib' implementation
+  dpt_lib_specific:
+    model_type: "dpt_large" # "dpt_large" or "dpt_hybrid"
+    # Path to local DPT backbone weights (e.g., .pt file from MiDaS or ADE20K DPT)
+    # This is used if implementation is 'dpt_lib'
+    backbone_weights_path: "weights/dpt_large-ade20k-b12dca68.pt"
+    # Scale factor for the fixed F.interpolate in the custom head of model_utils.py
+    # Set to 1.0 to disable interpolation within the head.
+    head_upsample_scale_factor: 2.0
+
+  # For 'huggingface' implementation
+  huggingface_specific:
+    # Name of the pre-trained DPT model from HuggingFace Hub or path to local HF model
+    model_name_or_path: "Intel/dpt-large-ade" # e.g., "Intel/dpt-large-ade", "Intel/dpt-hybrid-ade"
+
+  # Common model parameters
+  output_channels: 3 # For bx, by, magnitude - usually fixed
+  freeze_backbone: true
+
+# Data Configuration
+data:
+  # For training with real ground truth (train_dpt_blur.py)
+  real_gt_train:
+    blurred_dir: "data/GOPRO_Large/test/GOPR0384_11_00/blur"
+    # TODO: gt_dir: "data/your_dataset/train/gt_maps_npy" # .npy files (3, H, W) for bx, by, magnitude
+  
+  # TODO: real_gt_val:
+  #   blurred_dir: "data/your_dataset/val/blurred_images"
+  #   gt_dir: "data/your_dataset/val/gt_maps_npy"
+
+  # For dummy GT training (train_dpt_blur_dummy_gt.py or debug_train_step_hf.py)
+  dummy_gt_train:
+    # Only blurred_dir is needed, GT is generated on the fly
+    blurred_dir: "data/GOPRO_Large/test/GOPR0384_11_00/blur/000001.png" # Example path
+
+  # Common data parameters
+  img_size: 384        # Target size for cropping (training) or processing (processor/inference)
+  target_channels: 3   # Expected channels in GT .npy files (bx, by, magnitude) - should match model.output_channels
+  
+  # Augmentations (for training dataset)
+  augmentations:
+    random_crop: true       # Uses img_size for cropping if true during training
+    random_horizontal_flip_prob: 0.5 # Probability for horizontal flip (0.0 to disable)
+
+# Training Configuration (for train_dpt_blur.py or future HF training script)
+training:
+  epochs: 50
+  batch_size: 4
+  learning_rate: 0.0001 # 1e-4
+  optimizer: "AdamW"    # Currently only AdamW is implemented in scripts
+  # optimizer_params: # Optional: specific params for optimizer if needed
+  #   weight_decay: 0.01
+
+  loss_function: "MSELoss" # Currently only MSELoss is implemented
+
+  # Learning rate scheduler options
+  scheduler: # "ReduceLROnPlateau" or "StepLR" or "None"
+    name: "ReduceLROnPlateau"
+    params: # Specific to the scheduler
+      # For ReduceLROnPlateau
+      mode: "min"
+      factor: 0.2
+      patience: 5
+      verbose: true
+      # For StepLR
+      # step_size: 10
+      # gamma: 0.1
+
+  num_workers: 2       # For DataLoader
+  checkpoint_dir: "./checkpoints" # Base directory for saving checkpoints
+  resume_from_checkpoint: null # Path to a .pth file to resume, or null/empty
+
+# Inference Configuration (for run_dpt_blur_quantification.py or future HF inference script)
+inference:
+  # For single image inference using run_dpt_blur_quantification.py (HF or dpt_lib based on general.implementation)
+  # Note: image_path is usually a direct CLI argument for single inference.
+  # This section could hold default output paths or batch processing settings if developed.
+  output_dir: "results/"
+  default_output_filename: "output_blur_map.pt"
+  # For run_dpt_blur_quantification.py (dpt_lib version)
+  dpt_lib_inference:
+    optimize_memory_format: true # For channels_last optimization
+  # For future HF inference script
+  huggingface_inference:
+    # Any HF specific inference settings could go here
+    placeholder: null
+
+# Visualization Configuration (for visualize_blur_map.py)
+visualization:
+  quiver_step: 16
+
+# Debugging (for debug_train_step.py or debug_train_step_hf.py)
+debugging:
+  # These scripts often use hardcoded values or simplified CLI args,
+  # but some shared values from 'model' or 'data' sections can be used.
+  # Example: batch_size for debug_train_step_hf.py could come from training.batch_size
+  # if you want to test with a similar setup.
+  test_batch_size: 1 # Specifically for debug scripts if different from training.batch_size 

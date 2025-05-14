@@ -58,7 +58,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             else:
                  outputs_resized = outputs
 
-            loss = criterion(outputs_resized, targets)
+            loss = criterion(outputs_resized.contiguous(), targets.contiguous())
             if torch.isnan(loss):
                  print(f"Warning: NaN loss encountered at Epoch {current_epoch}, Batch {batch_idx}. Skipping batch.")
                  optimizer.zero_grad() # Clear potentially bad gradients
@@ -97,6 +97,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 outputs = model(inputs)
 
                 if outputs.shape[-2:] != targets.shape[-2:]:
+                     print(f"Warning: Output shape {outputs.shape[-2:]} does not match target shape {targets.shape[-2:]}. Interpolating outputs.")
                      outputs_resized = TF.interpolate(outputs, size=targets.shape[-2:], mode='bilinear', align_corners=False)
                 else:
                      outputs_resized = outputs
@@ -168,18 +169,18 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune DPT model for blur map prediction.")
     # Data Args
-    parser.add_argument('--blurred_dir_train', type=str, required=True, help='Directory containing blurred training images.')
+    parser.add_argument('--blurred_dir_train', type=str, required=False, default='data/', help='Directory containing blurred training images.')
     parser.add_argument('--gt_dir_train', type=str, required=True, help='Directory containing training ground truth .npy blur maps.')
     parser.add_argument('--blurred_dir_val', type=str, required=True, help='Directory containing blurred validation images.')
     parser.add_argument('--gt_dir_val', type=str, required=True, help='Directory containing validation ground truth .npy blur maps.')
     # Model Args
-    parser.add_argument('--weights', type=str, required=True, help='Path to pre-trained DPT segmentation weights (.pt file) for backbone initialization.')
+    parser.add_argument('--weights', type=str, default='weights/dpt_large-ade20k-b12dca68.pt', help='Path to pre-trained DPT segmentation weights (.pt file) for backbone initialization.')
     parser.add_argument('--model_type', type=str, default='dpt_hybrid', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
     parser.add_argument('--img_size', type=int, default=384, help='Image size to resize to for DPT input.')
     parser.add_argument('--output_channels', type=int, default=3, help='Number of output channels (must be 3 for bx, by, magnitude).')
     # Training Args
     parser.add_argument('--epochs', type=int, default=50, help='Total number of training epochs.')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training.')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training.')
     parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate.')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for DataLoader.')
     # Checkpoint Args
@@ -231,10 +232,11 @@ if __name__ == "__main__":
         return torch.utils.data.dataloader.default_collate(batch)
 
     # DataLoaders
+    use_pin_memory = True if device.type == 'cuda' else False
     train_loader = DataLoader(train_dataset_full, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn_skip_none)
+                              num_workers=args.num_workers, pin_memory=use_pin_memory, collate_fn=collate_fn_skip_none)
     val_loader = DataLoader(val_dataset_full, batch_size=args.batch_size, shuffle=False,
-                            num_workers=args.num_workers, pin_memory=True, collate_fn=collate_fn_skip_none)
+                            num_workers=args.num_workers, pin_memory=use_pin_memory, collate_fn=collate_fn_skip_none)
     print(f"Train loader: {len(train_loader)} batches. Val loader: {len(val_loader)} batches.")
     # Note: len(loader) gives number of batches. len(loader.dataset) gives original dataset size.
 
