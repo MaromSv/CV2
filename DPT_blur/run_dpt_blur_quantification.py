@@ -8,26 +8,26 @@ from dpt_lib.blocks import Interpolate
 import cv2
 import os
 
-def run_dpt_blur_prediction(tensor, model_path, output_channels=2, model_type="dpt_hybrid", optimize=True, print_shapes=False):
-    """Run DPT model adapted for blur vector (bx, by) prediction on a tensor.
+def run_dpt_blur_prediction(tensor, model_path, output_channels=3, model_type="dpt_hybrid", optimize=True, print_shapes=False):
+    """Run DPT model adapted for blur vector (bx, by) and magnitude prediction on a tensor.
 
     Loads a pre-trained DPT model, replaces its head
-    for regression, and predicts a 2-channel map representing the
-    X and Y components of the blur vector at each pixel.
+    for regression, and predicts a 3-channel map representing the
+    X and Y components of the blur vector and the blur magnitude at each pixel.
 
     Args:
         tensor (torch.Tensor): Input tensor of shape (B, C, H, W).
         model_path (str): Path to the pre-trained DPT model weights.
-        output_channels (int): Number of output channels (MUST be 2 for bx, by). Defaults to 2.
+        output_channels (int): Number of output channels (MUST be 3 for bx, by, magnitude). Defaults to 3.
         model_type (str): DPT model type ("dpt_large" or "dpt_hybrid"). Defaults to "dpt_hybrid".
         optimize (bool): Whether to use optimization for CUDA/MPS. Defaults to True.
         print_shapes (bool): If True, print shapes during inference. Defaults to False.
 
     Returns:
-        torch.Tensor: Blur vector predictions (bx, by) of shape (B, 2, H, W).
+        torch.Tensor: Blur predictions (bx, by, magnitude) of shape (B, 3, H, W).
     """
-    if output_channels != 2:
-        raise ValueError("output_channels must be 2 for (bx, by) vector prediction.")
+    if output_channels != 3:
+        raise ValueError("output_channels must be 3 for (bx, by, magnitude) vector prediction.")
 
     # --- Device Selection --- 
     if torch.backends.mps.is_available():
@@ -168,7 +168,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_type', type=str, default='dpt_large', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
     parser.add_argument('--img_h', type=int, default=256, help='Height of the input random tensor.')
     parser.add_argument('--img_w', type=int, default=256, help='Width of the input random tensor.')
-    parser.add_argument('--output_file', type=str, default='results/output_blur_vector.pt', help='Path to save the output blur map tensor.')
+    parser.add_argument('--output_file', type=str, default='results/output_blur_map.pt', help='Path to save the output blur map tensor.')
     parser.add_argument('--print_shapes', action='store_true', help='Print model layer shapes during inference.')
     parser.add_argument('--no_optimize', action='store_true', help='Disable optimizations (memory format).')
     args = parser.parse_args()
@@ -189,7 +189,7 @@ if __name__ == "__main__":
     blur_vector_predictions = run_dpt_blur_prediction(
         random_tensor,
         model_path=args.weights,
-        output_channels=2, # Must be 2 for (bx, by)
+        output_channels=3, # Must be 3 for (bx, by, magnitude)
         model_type=args.model_type,
         optimize=not args.no_optimize,
         print_shapes=args.print_shapes
@@ -205,6 +205,6 @@ if __name__ == "__main__":
     try:
         torch.save(output_tensor_to_save, args.output_file)
         print(f"Output blur vector map saved to: {args.output_file}")
-        print(f"Saved tensor shape: {output_tensor_to_save.shape}") # Should be (2, H, W)
+        print(f"Saved tensor shape: {output_tensor_to_save.shape}") # Should be (3, H, W)
     except Exception as e:
         print(f"Error saving output tensor to {args.output_file}: {e}") 

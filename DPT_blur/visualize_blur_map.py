@@ -13,31 +13,33 @@ def visualize_blur_map(tensor_path, quiver_step=16):
 
     try:
         # Load the tensor
-        blur_vector_map = torch.load(tensor_path, map_location=torch.device('cpu')) # Ensure load to CPU
-        print(f"Loaded tensor from {tensor_path} with shape: {blur_vector_map.shape}")
+        blur_map_tensor = torch.load(tensor_path, map_location=torch.device('cpu')) # Ensure load to CPU
+        print(f"Loaded tensor from {tensor_path} with shape: {blur_map_tensor.shape}")
 
-        if not isinstance(blur_vector_map, torch.Tensor):
+        if not isinstance(blur_map_tensor, torch.Tensor):
              raise TypeError("Loaded object is not a torch.Tensor")
-        if blur_vector_map.dim() != 3 or blur_vector_map.shape[0] != 2:
-            raise ValueError(f"Expected tensor shape (2, H, W) for (bx, by), but got {blur_vector_map.shape}")
+        if blur_map_tensor.dim() != 3 or blur_map_tensor.shape[0] != 3:
+            raise ValueError(f"Expected tensor shape (3, H, W) for (bx, by, magnitude), but got {blur_map_tensor.shape}")
 
         # Detach and convert to numpy
-        blur_vector_np = blur_vector_map.detach().cpu().numpy()
+        blur_map_np = blur_map_tensor.detach().cpu().numpy()
 
     except Exception as e:
         print(f"Error loading or processing tensor from {tensor_path}: {e}")
         return
 
     # Extract components
-    bx = blur_vector_np[0, :, :]
-    by = blur_vector_np[1, :, :]
+    bx = blur_map_np[0, :, :]
+    by = blur_map_np[1, :, :]
+    magnitude_map = blur_map_np[2, :, :] # Magnitude is now direct from channel 2
     H, W = bx.shape
 
-    # Calculate Magnitude and Orientation (Angle)
-    magnitude_map = np.sqrt(bx**2 + by**2)
+    # Calculate Orientation (Angle) from bx and by
     orientation_map = np.arctan2(by, bx) # Angle in radians [-pi, pi]
 
-    print(f"Calculated Magnitude map - Min: {magnitude_map.min():.4f}, Max: {magnitude_map.max():.4f}, Mean: {magnitude_map.mean():.4f}")
+    print(f"Extracted bx - Min: {bx.min():.4f}, Max: {bx.max():.4f}, Mean: {bx.mean():.4f}")
+    print(f"Extracted by - Min: {by.min():.4f}, Max: {by.max():.4f}, Mean: {by.mean():.4f}")
+    print(f"Extracted Magnitude map (Channel 2) - Min: {magnitude_map.min():.4f}, Max: {magnitude_map.max():.4f}, Mean: {magnitude_map.mean():.4f}")
     print(f"Calculated Orientation map (radians) - Min: {orientation_map.min():.4f}, Max: {orientation_map.max():.4f}, Mean: {orientation_map.mean():.4f}")
 
     # --- Visualization ---

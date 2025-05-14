@@ -14,12 +14,12 @@ except ImportError:
         raise ImportError("Could not import DPT model from dpt_lib. Check paths.")
 
 
-def create_dpt_blur_model(output_channels=2, model_type="dpt_hybrid", pretrained_weights_path=None, freeze_backbone=True):
+def create_dpt_blur_model(output_channels=3, model_type="dpt_hybrid", pretrained_weights_path=None, freeze_backbone=True):
     """
     Creates the DPT model, loads pre-trained DPT backbone weights, and replaces the head.
 
     Args:
-        output_channels (int): Number of output channels for the regression head (e.g., 2 for bx, by).
+        output_channels (int): Number of output channels for the regression head (e.g., 3 for bx, by, magnitude).
         model_type (str): Type of DPT model, 'dpt_large' or 'dpt_hybrid'.
         pretrained_weights_path (str, optional): Path to pre-trained DPT weights for the backbone.
                                                  If None, backbone is initialized with its default pre-training
@@ -103,7 +103,7 @@ def create_dpt_blur_model(output_channels=2, model_type="dpt_hybrid", pretrained
         print("DPT backbone parameters will remain trainable.")
 
 
-    # Replace the head with a new regression head for blur map (bx, by)
+    # Replace the head with a new regression head for blur map (bx, by, magnitude)
     # This is an example head; adjust architecture as needed.
     model.scratch.output_conv = nn.Sequential(
             nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1, bias=False),
@@ -113,7 +113,7 @@ def create_dpt_blur_model(output_channels=2, model_type="dpt_hybrid", pretrained
             nn.Conv2d(features // 2, 32, kernel_size=3, stride=1, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(True),
-            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0) # Output bx, by
+            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0) # Output bx, by, magnitude
             # No final activation like Sigmoid/Tanh unless your GT is normalized to a specific range
         )
     print(f"Initialized new model head for {output_channels}-channel regression.")
@@ -133,14 +133,14 @@ if __name__ == '__main__':
     try:
         # Test Hybrid
         print("\n--- Testing DPT Hybrid ---")
-        model_hybrid = create_dpt_blur_model(model_type="dpt_hybrid", pretrained_weights_path=None, freeze_backbone=True)
+        model_hybrid = create_dpt_blur_model(model_type="dpt_hybrid", pretrained_weights_path=None, freeze_backbone=True, output_channels=3)
         dummy_input_hybrid = torch.randn(1, 3, 384, 384)
         output_hybrid = model_hybrid(dummy_input_hybrid)
         print(f"Hybrid model output shape: {output_hybrid.shape}")
 
         # Test Large
         print("\n--- Testing DPT Large ---")
-        model_large = create_dpt_blur_model(model_type="dpt_large", pretrained_weights_path=None, freeze_backbone=False)
+        model_large = create_dpt_blur_model(model_type="dpt_large", pretrained_weights_path=None, freeze_backbone=False, output_channels=3)
         dummy_input_large = torch.randn(1, 3, 384, 384)
         output_large = model_large(dummy_input_large)
         print(f"Large model output shape: {output_large.shape}")

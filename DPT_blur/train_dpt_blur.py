@@ -176,7 +176,7 @@ if __name__ == "__main__":
     parser.add_argument('--weights', type=str, required=True, help='Path to pre-trained DPT segmentation weights (.pt file) for backbone initialization.')
     parser.add_argument('--model_type', type=str, default='dpt_hybrid', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
     parser.add_argument('--img_size', type=int, default=384, help='Image size to resize to for DPT input.')
-    parser.add_argument('--output_channels', type=int, default=2, help='Number of output channels (must be 2 for bx, by).')
+    parser.add_argument('--output_channels', type=int, default=3, help='Number of output channels (must be 3 for bx, by, magnitude).')
     # Training Args
     parser.add_argument('--epochs', type=int, default=50, help='Total number of training epochs.')
     parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training.')
@@ -201,9 +201,9 @@ if __name__ == "__main__":
         device = torch.device("cpu")
     print(f"Using device: {device}")
 
-    # Ensure output channels is 2 for bx, by prediction
-    if args.output_channels != 2:
-        raise ValueError("--output_channels must be 2 for (bx, by) vector prediction.")
+    # Ensure output channels is 3 for bx, by, magnitude prediction
+    if args.output_channels != 3:
+        raise ValueError("--output_channels must be 3 for (bx, by, magnitude) vector prediction.")
 
     # Transforms
     dpt_transform = Compose([

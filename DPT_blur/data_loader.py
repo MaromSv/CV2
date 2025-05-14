@@ -19,7 +19,7 @@ class BlurMapDataset(Dataset):
         Args:
             blurred_dir (str): Directory containing blurred input images (.png, .jpg, .jpeg).
             gt_dir (str): Directory containing ground truth blur maps (.npy files).
-                          Expected GT format is (bx, by) with shape (2, H, W).
+                          Expected GT format is (bx, by, magnitude) with shape (3, H, W).
             transform (callable, optional): Optional transform to be applied to the input image sample dictionary.
                                            Expected input: {'image': image_array}
                                            Expected output: {'image': image_tensor}
@@ -78,7 +78,8 @@ class BlurMapDataset(Dataset):
         Returns:
             tuple: (image_tensor, gt_tensor) if successful, otherwise None.
                    image_tensor: Transformed input image (potentially cropped).
-                   gt_tensor: Ground truth blur map tensor, resized to match image_tensor shape.
+                   gt_tensor: Ground truth blur map tensor (bx, by, magnitude),
+                              resized to match image_tensor shape.
             None: If any error occurs during loading, processing, or if filtering is needed.
         """
         img_path = self.image_files[idx]
@@ -102,24 +103,12 @@ class BlurMapDataset(Dataset):
 
         # --- Load Ground Truth ---
         try:
-            # TODO: Adapt GT loading based on the final format.
-            # This implementation assumes GT is ALREADY stored as (bx, by) in .npy files.
-            # Expected shape: (2, H, W)
-            gt_map_xy = np.load(gt_path).astype(np.float32) # CHW
+            # Load the 3-channel (bx, by, magnitude) .npy file
+            # Expected shape: (3, H, W)
+            gt_blur_map = np.load(gt_path).astype(np.float32) # CHW
 
-            if gt_map_xy.ndim != 3 or gt_map_xy.shape[0] != 2:
-                 raise ValueError(f"Expected GT shape (2, H, W) for (bx, by), got {gt_map_xy.shape} for {gt_path}")
-
-            # TODO: If GT is stored differently (e.g., Magnitude/Angle), implement conversion here.
-            # Example (if GT was [Mag, Angle_Radians]):
-            # if gt_map_mag_angle.shape[0] != 2:
-            #     raise ValueError(f"Expected GT shape (2, H, W), got {gt_map_mag_angle.shape}")
-            # print(f"DEBUG: Converting GT {base_name}.npy from (Mag, Angle) -> (bx, by)")
-            # magnitude = gt_map_mag_angle[0, :, :]
-            # angle_rad = gt_map_mag_angle[1, :, :] # Ensure this is in RADIANS
-            # bx = magnitude * np.cos(angle_rad)
-            # by = magnitude * np.sin(angle_rad)
-            # gt_map_xy = np.stack((bx, by), axis=0) # CHW
+            if gt_blur_map.ndim != 3 or gt_blur_map.shape[0] != 3:
+                 raise ValueError(f"Expected GT shape (3, H, W) for (bx, by, magnitude), got {gt_blur_map.shape} for {gt_path}")
 
         except Exception as e:
              print(f"Error loading/processing ground truth {gt_path}: {e}. Returning None.")
@@ -128,7 +117,7 @@ class BlurMapDataset(Dataset):
         # --- Random Cropping (for training) ---
         if self.is_train and self.crop_size is not None:
             H_orig, W_orig = image.shape[:2] # Original image dimensions (HWC)
-            C_gt, H_gt, W_gt = gt_map_xy.shape # Original GT dimensions (CHW)
+            C_gt, H_gt, W_gt = gt_blur_map.shape # Original GT dimensions (CHW)
 
             # Basic check for dimension consistency
             if H_orig != H_gt or W_orig != W_gt:
@@ -146,7 +135,7 @@ class BlurMapDataset(Dataset):
 
             # Perform the crop on both image and GT map
             image = image[top : top + self.crop_size, left : left + self.crop_size, :] # HWC
-            gt_map_xy = gt_map_xy[:, top : top + self.crop_size, left : left + self.crop_size] # CHW
+            gt_blur_map = gt_blur_map[:, top : top + self.crop_size, left : left + self.crop_size] # CHW
 
         # --- Apply Input Image Transforms ---
         # The transform pipeline (e.g., dpt_transform) should handle:
@@ -166,7 +155,7 @@ class BlurMapDataset(Dataset):
 
         # --- Process Ground Truth Tensor ---
         # Convert GT numpy array (CHW) to tensor
-        gt_tensor = torch.from_numpy(gt_map_xy.copy()).float() # Use .copy() for safety
+        gt_tensor = torch.from_numpy(gt_blur_map.copy()).float() # Use .copy() for safety
 
         # Resize GT map tensor to match the final spatial dimensions of the image_tensor
         # This accounts for any resizing done within the self.transform pipeline (e.g., ensure_multiple_of)
@@ -175,7 +164,7 @@ class BlurMapDataset(Dataset):
             gt_tensor = TF.interpolate(gt_tensor.unsqueeze(0), size=final_target_size, mode='bilinear', align_corners=False)
             gt_tensor = gt_tensor.squeeze(0) # Remove batch dim added for interpolate
 
-        # Apply optional target-specific transforms (e.g., normalization/scaling of bx, by)
+        # Apply optional target-specific transforms (e.g., normalization/scaling of bx, by, magnitude)
         if self.target_transform:
              gt_tensor = self.target_transform(gt_tensor)
 
