@@ -93,46 +93,53 @@ class Trainer():
         tq.set_description(f'Epoch [{self.epoch}/{self.args.end_epoch}] training')
         total_train_loss = AverageMeter()
         total_train_psnr = AverageMeter()
-        total_train_lpips = AverageMeter()
         
         for idx, sample in enumerate(tq):
             self.model.train()
             self.optimizer.zero_grad()
-             # input: [B, C, H, W], gt: [B, C, H, W]
-            blur, sharp = sample['blur'].to(device), sample['sharp'].to(device)
-            outputs = self.model(blur)
-            outputs =  [output.clamp(-0.5, 0.5) for output in outputs]   # [B, C, H, W]
-            gt_img2 = F.interpolate(sharp, scale_factor=0.5, mode='bilinear')
-            gt_img4 = F.interpolate(sharp, scale_factor=0.25, mode='bilinear')
-            l1 = self.criterion(outputs[0], gt_img4)
-            l2 = self.criterion(outputs[1], gt_img2)
-            l3 = self.criterion(outputs[2], sharp)
-            loss_content = l1+l2+l3
-
-            label_fft1 = rfft(gt_img4, 2)
-            pred_fft1 = rfft(outputs[0], 2)
-            label_fft2 = rfft(gt_img2, 2)
-            pred_fft2 = rfft(outputs[1], 2)
-            label_fft3 = rfft(sharp, 2)
-            pred_fft3 = rfft(outputs[2], 2)
-
-            f1 = self.criterion(pred_fft1, label_fft1)
-            f2 = self.criterion(pred_fft2, label_fft2)
-            f3 = self.criterion(pred_fft3, label_fft3)
-            loss_fft = f1+f2+f3
-
-            loss = loss_content + 0.1 * loss_fft
+            
+            # Get blur image and ground truth blur field
+            blur, gt_field = sample['blur'].to(self.device), sample['blur_field'].to(self.device)
+            outs = self.model(blur)  # list of (dx,dy,mag) tuples
+            
+            # Reconstruct 3-channel prediction for each scale
+            preds = []
+            scales = [0.25, 0.5, 1.0]
+            for out, s in zip(outs, scales):
+                dx, dy, mag = out
+                pred = torch.cat([dx, dy, mag], dim=1)
+                preds.append(pred)
+                
+            # Downsample GT to each scale
+            gts = [F.interpolate(gt_field, scale_factor=s, mode='bilinear') for s in scales]
+            
+            # Compute regression losses
+            l1 = self.criterion(preds[0], gts[0])
+            l2 = self.criterion(preds[1], gts[1])
+            l3 = self.criterion(preds[2], gts[2])
+            loss_content = l1 + l2 + l3
+            
+            # FFT losses (optional)
+            loss_fft = 0
+            if self.args.use_fft_loss:
+                for pred, gt in zip(preds, gts):
+                    pred_fft = rfft(pred, 2)
+                    gt_fft = rfft(gt, 2)
+                    loss_fft += self.criterion(pred_fft, gt_fft)
+                loss = loss_content + 0.1 * loss_fft
+            else:
+                loss = loss_content
+                
             loss.backward()
-
-            #torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
             self.optimizer.step()
-
+            
             total_train_loss.update(loss.detach().item())
-            psnr = calc_psnr(outputs[2].detach(), sharp.detach())
-            total_train_psnr.update(psnr)
-
-            tq.set_postfix({'loss': total_train_loss.avg, 'psnr': total_train_psnr.avg, 'lpips': total_train_lpips.avg,'lr': optimizer.param_groups[0]['lr']})
+            
+            # Calculate PSNR on magnitude channel only for visualization
+            mag_psnr = calc_psnr(preds[2][:, 2:3, :, :].detach(), gts[2][:, 2:3, :, :].detach())
+            total_train_psnr.update(mag_psnr)
+            
+            tq.set_postfix({'loss': total_train_loss.avg, 'mag_psnr': total_train_psnr.avg, 'lr': self.optimizer.param_groups[0]['lr']})
 
         if self.scheduler:
             self.scheduler.step()

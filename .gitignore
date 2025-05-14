@@ -1,5 +1,6 @@
 # DPT Weights
 weights/
+dummy_checkpoints/
 
 # Python cache
 __pycache__/
@@ -28,4 +29,9 @@ DPT_blur/results/
 
 # Datasets
 data/
+data_processed/
 labels/
+
+# Skip original DPT repository
+dpt/
+huggingface_scripts/

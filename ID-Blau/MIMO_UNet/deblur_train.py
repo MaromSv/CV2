@@ -27,13 +27,9 @@ torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = True
 
-try:
-    from torch import rfft
-except ImportError:
-    def rfft(x, d):
-        t = torch.fft.fft(x, dim=(-d))
-        r = torch.stack((t.real, t.imag), -1)
-        return r
+def rfft(x, dim):
+    """Real FFT for PyTorch tensors"""
+    return torch.fft.rfftn(x, dim=dim)
 
 class Trainer():
     def __init__(self, dataloader_train, dataloader_val, model, optimizer, scheduler, args, writer) -> None:
@@ -92,84 +88,79 @@ class Trainer():
         tq.set_description(f'Epoch [{self.epoch}/{self.args.end_epoch}] training')
         total_train_loss = AverageMeter()
         total_train_psnr = AverageMeter()
-        total_train_lpips = AverageMeter()
         
         for idx, sample in enumerate(tq):
             self.model.train()
             self.optimizer.zero_grad()
-             # input: [B, C, H, W], gt: [B, C, H, W]
-            blur, sharp = sample['blur'].to(device), sample['sharp'].to(device)
-            outputs = self.model(blur)
-            outputs =  [output.clamp(-0.5, 0.5) for output in outputs]   # [B, C, H, W]
-            gt_img2 = F.interpolate(sharp, scale_factor=0.5, mode='bilinear')
-            gt_img4 = F.interpolate(sharp, scale_factor=0.25, mode='bilinear')
-            l1 = self.criterion(outputs[0], gt_img4)
-            l2 = self.criterion(outputs[1], gt_img2)
-            l3 = self.criterion(outputs[2], sharp)
-            loss_content = l1+l2+l3
-
-            label_fft1 = rfft(gt_img4, 2)
-            pred_fft1 = rfft(outputs[0], 2)
-            label_fft2 = rfft(gt_img2, 2)
-            pred_fft2 = rfft(outputs[1], 2)
-            label_fft3 = rfft(sharp, 2)
-            pred_fft3 = rfft(outputs[2], 2)
-
-            f1 = self.criterion(pred_fft1, label_fft1)
-            f2 = self.criterion(pred_fft2, label_fft2)
-            f3 = self.criterion(pred_fft3, label_fft3)
-            loss_fft = f1+f2+f3
-
-            loss = loss_content + 0.1 * loss_fft
+            
+            # Get blur image and ground truth blur field (only at highest resolution)
+            blur, gt_field = sample['blur'].to(self.device), sample['blur_field'].to(self.device)
+            outs = self.model(blur)  # list of (dx,dy,mag) tuples
+            
+            # Get only the highest resolution prediction (last in the list)
+            dx, dy, mag = outs[2]
+            pred = torch.cat([dx, dy, mag], dim=1)
+            
+            # Compute loss only at the highest resolution
+            loss_content = self.criterion(pred, gt_field)
+            
+            # FFT loss (optional)
+            loss_fft = 0
+            if self.args.use_fft_loss:
+                pred_fft = rfft(pred, 2)
+                gt_fft = rfft(gt_field, 2)
+                loss_fft = self.criterion(pred_fft, gt_fft)
+                loss = loss_content + 0.1 * loss_fft
+            else:
+                loss = loss_content
+            
             loss.backward()
-
-            #torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
-
             self.optimizer.step()
-
+            
             total_train_loss.update(loss.detach().item())
-            psnr = calc_psnr(outputs[2].detach(), sharp.detach())
-            total_train_psnr.update(psnr)
-
-            tq.set_postfix({'loss': total_train_loss.avg, 'psnr': total_train_psnr.avg, 'lpips': total_train_lpips.avg,'lr': optimizer.param_groups[0]['lr']})
+            
+            # Calculate PSNR on magnitude channel only for visualization
+            mag_psnr = calc_psnr(pred[:, 2:3, :, :].detach(), gt_field[:, 2:3, :, :].detach())
+            total_train_psnr.update(mag_psnr)
+            
+            tq.set_postfix({'loss': total_train_loss.avg, 'mag_psnr': total_train_psnr.avg, 'lr': self.optimizer.param_groups[0]['lr']})
 
         if self.scheduler:
             self.scheduler.step()
         if self.writer and dist.get_rank() == 0:
             self.writer.add_scalar('Loss/Train_loss', total_train_loss.avg, self.epoch)
-            self.writer.add_scalar('Loss/Train_psnr', total_train_psnr.avg, self.epoch)
-            self.writer.add_scalar('Loss/Train_lpips', total_train_lpips.avg, self.epoch)
+            self.writer.add_scalar('Loss/Train_mag_psnr', total_train_psnr.avg, self.epoch)
             logging.info(
-                f'Epoch [{self.epoch}/{args.end_epoch}]: Train_loss: {total_train_loss.avg:.4f} Train_psnr:{total_train_psnr.avg:.4f} Train_lpips:{total_train_lpips.avg:.4f}')
+                f'Epoch [{self.epoch}/{self.args.end_epoch}]: Train_loss: {total_train_loss.avg:.4f} Train_mag_psnr:{total_train_psnr.avg:.4f}')
     
     @torch.no_grad()
-    def _valid(self, blur, sharp):
+    def _valid(self, blur, gt_field):
         self.model.eval()
-        outputs = self.model(blur)
-        outputs =  [output.clamp(-0.5, 0.5) for output in outputs]   # [B, C, H, W]
-        gt_img2 = F.interpolate(sharp, scale_factor=0.5, mode='bilinear')
-        gt_img4 = F.interpolate(sharp, scale_factor=0.25, mode='bilinear')
-        l1 = self.criterion(outputs[0], gt_img4)
-        l2 = self.criterion(outputs[1], gt_img2)
-        l3 = self.criterion(outputs[2], sharp)
-        loss_content = l1+l2+l3
-
-        label_fft1 = rfft(gt_img4, 2)
-        pred_fft1 = rfft(outputs[0], 2)
-        label_fft2 = rfft(gt_img2, 2)
-        pred_fft2 = rfft(outputs[1], 2)
-        label_fft3 = rfft(sharp, 2)
-        pred_fft3 = rfft(outputs[2], 2)
-
-        f1 = self.criterion(pred_fft1, label_fft1)
-        f2 = self.criterion(pred_fft2, label_fft2)
-        f3 = self.criterion(pred_fft3, label_fft3)
-        loss_fft = f1+f2+f3
-
-        loss = loss_content + 0.1 * loss_fft
-        psnr = torch.mean(self.psnr_func(outputs[2].detach(), sharp.detach())).item()
-        lpips = torch.mean(self.lpips_func(outputs[2].detach(), sharp.detach())).item()
-        return psnr, lpips, loss.item()
+        outs = self.model(blur)
+        
+        # Get only the highest resolution prediction
+        dx, dy, mag = outs[2]
+        pred = torch.cat([dx, dy, mag], dim=1)
+        
+        # Compute loss only at the highest resolution
+        loss_content = self.criterion(pred, gt_field)
+        
+        # FFT loss (optional)
+        if self.args.use_fft_loss:
+            pred_fft = rfft(pred, 2)
+            gt_fft = rfft(gt_field, 2)
+            loss_fft = self.criterion(pred_fft, gt_fft)
+            loss = loss_content + 0.1 * loss_fft
+        else:
+            loss = loss_content
+        
+        # Calculate PSNR on magnitude channel only
+        mag_psnr = torch.mean(self.psnr_func(pred[:, 2:3, :, :].detach(), gt_field[:, 2:3, :, :].detach())).item()
+        
+        # For LPIPS, we'll just use the magnitude channel
+        mag_lpips = torch.mean(self.lpips_func(pred[:, 2:3, :, :].detach(), gt_field[:, 2:3, :, :].detach())).item()
+        
+        return mag_psnr, mag_lpips, loss.item()
     
     @torch.no_grad()
     def valid(self):
@@ -180,8 +171,8 @@ class Trainer():
         tq = tqdm.tqdm(self.dataloader_val, total=len(self.dataloader_val))
         tq.set_description(f'Epoch [{self.epoch}/{self.args.end_epoch}] Validation')
         for idx, sample in enumerate(tq):
-            blur, sharp = sample['blur'].to(device), sample['sharp'].to(device)
-            psnr, lpips, loss = self._valid(blur, sharp)
+            blur, gt_field = sample['blur'].to(self.device), sample['blur_field'].to(self.device)
+            psnr, lpips, loss = self._valid(blur, gt_field)
             total_val_psnr.update(psnr)
             total_val_lpips.update(lpips)
             total_val_loss.update(loss)
@@ -191,16 +182,16 @@ class Trainer():
         self.writer.add_scalar('Val/Test_psnr', total_val_psnr.avg, self.epoch)
         self.writer.add_scalar('Val/Test_loss', total_val_loss.avg, self.epoch)
         logging.info(
-            f'Crop Validation Epoch [{self.epoch}/{args.end_epoch}]: Test Loss: {total_val_loss.avg:.4f} Test lpips: {total_val_lpips.avg:.4f} Test psnr:{total_val_psnr.avg:.4f}')
+            f'Validation Epoch [{self.epoch}/{self.args.end_epoch}]: Test Loss: {total_val_loss.avg:.4f} Test lpips: {total_val_lpips.avg:.4f} Test psnr:{total_val_psnr.avg:.4f}')
         
         if self.best_psnr < total_val_psnr.avg:
             self.best_psnr = total_val_psnr.avg
-            args.best_psnr = self.best_psnr
-            best_state = {'model_state': self.model.module.state_dict(), 'args': args}
-            torch.save(best_state, os.path.join(args.dir_path, 'best_{}.pth'.format(args.model_name)))
+            self.args.best_psnr = self.best_psnr
+            best_state = {'model_state': self.model.module.state_dict(), 'args': self.args}
+            torch.save(best_state, os.path.join(self.args.dir_path, f'best_{self.args.model_name}.pth'))
 
-            print('Saving model with best PSNR {:.3f}...'.format(self.best_psnr))
-            logging.info('Saving model with best PSNR {:.3f}...'.format(self.best_psnr))
+            print(f'Saving model with best PSNR {self.best_psnr:.3f}...')
+            logging.info(f'Saving model with best PSNR {self.best_psnr:.3f}...')
             
     def save_model(self):
         """save model parameters"""
@@ -221,33 +212,58 @@ class Trainer():
 
     @torch.no_grad()
     def val_save_image(self, dir_path, dataset, val_num=3):
-        """use train set to val and save image"""
+        """Save visualization of blur field predictions"""
         os.makedirs(dir_path, exist_ok=True)
         self.model.eval()
         for idx in random.sample(range(0, len(dataset)), val_num):
             sample = dataset[idx]
-            blur, sharp = sample['blur'].unsqueeze(0).to(device), sample['sharp'].unsqueeze(0).to(device)
+            blur = sample['blur'].unsqueeze(0).to(self.device)
+            gt_field = sample['blur_field'].unsqueeze(0).to(self.device)
+            
             b, c, h, w = blur.shape
             factor = 8
             h_n = (factor - h % factor) % factor
             w_n = (factor - w % factor) % factor
             blur = torch.nn.functional.pad(blur, (0, w_n, 0, h_n), mode='reflect')
-            output = self.model(blur) # [3, C, H, W]
-            output = output[2][:, :, :h, :w]
-            output = output.clamp(-0.5, 0.5) # [C, H, W]
-
-            save_img_dir_path = os.path.join(dir_path, f'visualization', 'output')
-            os.makedirs(save_img_dir_path, exist_ok=True)
-            save_sharp_dir_path = os.path.join(dir_path, f'visualization', 'sharp')
-            os.makedirs(save_sharp_dir_path, exist_ok=True)
-
-            save_img_path = os.path.join(save_img_dir_path, f'{self.epoch:05d}_{idx:05d}.png')
-            output = tensor2cv(output + 0.5)
-            cv2.imwrite(save_img_path, output)
-
-            save_sharp_path = os.path.join(save_sharp_dir_path, f'{self.epoch:05d}_{idx:05d}.png')
-            sharp = tensor2cv(sharp + 0.5)
-            cv2.imwrite(save_sharp_path, sharp)
+            
+            outputs = self.model(blur)  # [(dx,dy,mag), (dx,dy,mag), (dx,dy,mag)]
+            dx, dy, mag = outputs[2]  # Use full resolution output
+            
+            # Crop to original size
+            dx = dx[:, :, :h, :w]
+            dy = dy[:, :, :h, :w]
+            mag = mag[:, :, :h, :w]
+            
+            # Clamp magnitude
+            mag = mag.clamp(-0.5, 0.5)
+            
+            # Create visualization directories
+            save_dir_path = os.path.join(dir_path, f'visualization')
+            os.makedirs(os.path.join(save_dir_path, 'mag'), exist_ok=True)
+            os.makedirs(os.path.join(save_dir_path, 'dx'), exist_ok=True)
+            os.makedirs(os.path.join(save_dir_path, 'dy'), exist_ok=True)
+            os.makedirs(os.path.join(save_dir_path, 'gt_mag'), exist_ok=True)
+            
+            # Save magnitude
+            save_mag_path = os.path.join(save_dir_path, 'mag', f'{self.epoch:05d}_{idx:05d}.png')
+            mag_img = tensor2cv(mag + 0.5)  # Convert to 0-1 range
+            cv2.imwrite(save_mag_path, mag_img)
+            
+            # Save dx
+            save_dx_path = os.path.join(save_dir_path, 'dx', f'{self.epoch:05d}_{idx:05d}.png')
+            dx_img = tensor2cv(dx + 0.5)  # Convert to 0-1 range
+            cv2.imwrite(save_dx_path, dx_img)
+            
+            # Save dy
+            save_dy_path = os.path.join(save_dir_path, 'dy', f'{self.epoch:05d}_{idx:05d}.png')
+            dy_img = tensor2cv(dy + 0.5)  # Convert to 0-1 range
+            cv2.imwrite(save_dy_path, dy_img)
+            
+            # Save ground truth magnitude
+            save_gt_mag_path = os.path.join(save_dir_path, 'gt_mag', f'{self.epoch:05d}_{idx:05d}.png')
+            gt_mag = gt_field[0, 2:3, :, :]  # Extract magnitude channel
+            gt_mag_img = tensor2cv(gt_mag + 0.5)  # Convert to 0-1 range
+            cv2.imwrite(save_gt_mag_path, gt_mag_img)
 
 if __name__ == "__main__":
     # hyperparameters
@@ -273,6 +289,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume", default=None, type=str)
     parser.add_argument("--only_use_generate_data", action='store_true', help="only use generated data to train model.")
     parser.add_argument("--local_rank", default=os.getenv('LOCAL_RANK', -1), type=int)
+    parser.add_argument("--use_fft_loss", action='store_true', help="Use FFT loss in addition to spatial loss")
     
     args = parser.parse_args()
 
