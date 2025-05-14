@@ -275,11 +275,11 @@ def test_blur_field(image_path, output_dir, device='cuda'):
     outputs = net(input_tensor)
     
     # Debug: Print the output structure
-    print(f"Output type: {type(outputs)}")
-    print(f"Output length: {len(outputs)}")
-    for i, out in enumerate(outputs):
-        print(f"Output[{i}] type: {type(out)}")
-        print(f"Output[{i}] shape: {out.shape if hasattr(out, 'shape') else 'No shape'}")
+    # print(f"Output type: {type(outputs)}")
+    # print(f"Output length: {len(outputs)}")
+    # for i, out in enumerate(outputs):
+    #     print(f"Output[{i}] type: {type(out)}")
+    #     print(f"Output[{i}] shape: {out.shape if hasattr(out, 'shape') else 'No shape'}")
     
     # Process all three resolution levels
     base_name = os.path.splitext(os.path.basename(image_path))[0]
