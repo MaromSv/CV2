@@ -1,0 +1,20 @@
+# Configuration for MIMO-UNet project
+
+# Paths
+paths:
+  # Model weights (leave empty to use random initialization)
+  model_weights: ""
+  # Test data
+  test_data: "./dataset/test"
+  # Results directory
+  results_dir: "./results"
+
+# Model settings
+model:
+  name: "MIMO-UNetPlus"  # or "MIMO-UNet"
+  device: "cuda"  # or "cpu"
+
+# Visualization settings
+visualization:
+  quiver_step: 16
+  save_visualizations: true
