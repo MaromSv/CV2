@@ -10,11 +10,15 @@ from torchvision import transforms
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
+# Add grandparent directory to path to access DPT_blur
+grandparent_dir = os.path.abspath(os.path.join(parent_dir, '..'))
+sys.path.append(grandparent_dir)
+
 # Import from MIMO-UNet
 from MIMOUNet import build_MIMOUnet_net
 
 # Import from DPT_blur
-from DPT_blur.visualize_blur_map import visualize_blur_map
+from DPT_blur.visualize_blur_map import visualize_blur_map, visualize_blur_field_with_legend
 
 def load_config(config_path):
     """Load configuration from YAML file"""
@@ -87,23 +91,26 @@ def test_blur_field(image_path, output_dir, config, device='cuda'):
     # Crop to original size
     blur_field = blur_field[:, :, :h, :w]
     
-    # Save tensor
+    # Generate base name for output files
     base_name = os.path.splitext(os.path.basename(image_path))[0]
-    tensor_path = os.path.join(output_dir, f"{base_name}_blur_field.pt")
-    torch.save(blur_field[0].cpu(), tensor_path)
     
-    print(f"Saved blur field tensor to: {tensor_path}")
-    print("Generating visualization...")
+    # Visualize using the new function with color wheel legend
+    vis_path = os.path.join(output_dir, f"{base_name}_blur_field.png")
     
-    # Visualize using DPT_blur's visualization function
-    quiver_step = config['visualization'].get('quiver_step', 16)
-    vis_path = os.path.join(output_dir, f"{base_name}_visualization.png")
-    visualize_blur_map(tensor_path, image_path, quiver_step, output_path=vis_path)
+    # Create a temporary tensor path for visualization
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix='.pt') as tmp:
+        tensor_path = tmp.name
+        torch.save(blur_field[0].cpu(), tensor_path)
+        
+        # Visualize the blur field
+        visualize_blur_field_with_legend(tensor_path, image_path, output_path=vis_path, 
+                                        title="Blur Condition Field")
     
-    print(f"Saved visualization to: {vis_path}")
+    print(f"Saved blur field visualization to: {vis_path}")
     print("Done!")
     
-    return tensor_path, vis_path
+    return vis_path
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test MIMO-UNet blur field prediction on a single image")
