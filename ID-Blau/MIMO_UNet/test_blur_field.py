@@ -1,116 +1,128 @@
 import os
 import sys
-import torch
-import yaml
 import argparse
-from PIL import Image
-from torchvision import transforms
+import logging
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import cv2
 
-# Add parent directory to path
+# Add parent directory to path for imports
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
-# Add grandparent directory to path to access DPT_blur
-grandparent_dir = os.path.abspath(os.path.join(parent_dir, '..'))
-sys.path.append(grandparent_dir)
+# Import from DPT_blur
+from DPT_blur.data_loader import BlurMapDataset
+from DPT_blur.visualize_blur_map import visualize_blur_field_with_legend, visualize_blur_map
 
-# Import from MIMO-UNet
+# Import MIMO-UNet model
 from MIMOUNet import build_MIMOUnet_net
 
-# Import from DPT_blur
-from DPT_blur.visualize_blur_map import visualize_blur_map, visualize_blur_field_with_legend
-
-def load_config(config_path):
-    """Load configuration from YAML file"""
-    with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
-
-@torch.no_grad()
-def test_blur_field(image_path, output_dir, config, device='cuda'):
-    """Test blur field prediction on a single image"""
-    # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
+def test_model(args):
+    # Set up logging
+    os.makedirs(args.output_dir, exist_ok=True)
+    logging.basicConfig(
+        filename=os.path.join(args.output_dir, 'testing.log'),
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    logging.getLogger('').addHandler(console)
+    
+    # Set device
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logging.info(f"Using device: {device}")
+    
+    # Create test dataset and dataloader
+    test_dataset = BlurMapDataset(
+        image_dir=args.test_data,
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+        ])
+    )
+    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=4)
     
     # Load model
-    model_name = config['model']['name']
-    print(f"Initializing {model_name} with random weights...")
+    model_name = args.model_name
+    logging.info(f"Initializing {model_name}...")
     net = build_MIMOUnet_net(model_name)
     
-    # Try to load weights if they exist, but don't require them
-    model_weights = config['paths'].get('model_weights', '')
-    if model_weights and os.path.exists(model_weights):
-        print(f"Loading weights from {model_weights}")
-        state_dict = torch.load(model_weights, map_location=device)
-        # Remove 'module.' prefix if model was saved with DataParallel
-        if list(state_dict.keys())[0].startswith('module.'):
-            state_dict = {k[7:]: v for k, v in state_dict.items()}
-        net.load_state_dict(state_dict)
-    else:
-        print("Using random initialization (no pre-trained weights)")
+    # Load weights
+    model_weights = args.model_weights
+    logging.info(f"Loading weights from {model_weights}")
+    state_dict = torch.load(model_weights, map_location=device)
+    
+    # Handle checkpoint format
+    if 'model_state_dict' in state_dict:
+        state_dict = state_dict['model_state_dict']
+    
+    # Remove 'module.' prefix if model was saved with DataParallel
+    if list(state_dict.keys())[0].startswith('module.'):
+        state_dict = {k[7:]: v for k, v in state_dict.items()}
+    
+    net.load_state_dict(state_dict)
     
     net = net.to(device)
     net.eval()
     
-    # Load and preprocess image
-    print(f"Processing image: {image_path}")
-    original_img = Image.open(image_path).convert('RGB')
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
-    ])
-    input_tensor = transform(original_img).unsqueeze(0).to(device)
-    
-    # Get original dimensions
-    b, c, h, w = input_tensor.shape
-    
-    # Pad to multiple of 8 if needed
-    factor = 8
-    h_n = (factor - h % factor) % factor
-    w_n = (factor - w % factor) % factor
-    input_tensor = torch.nn.functional.pad(input_tensor, (0, w_n, 0, h_n), mode='reflect')
-    
-    # Forward pass
-    print("Running model inference...")
-    outputs = net(input_tensor)
-    
-    # Process output (assuming the model returns a list of outputs at different resolutions)
-    # We use the highest resolution output (last in the list)
-    if isinstance(outputs, list) and len(outputs) > 0:
-        if isinstance(outputs[-1], tuple) and len(outputs[-1]) == 3:
-            # If output is (dx, dy, mag) tuple
-            dx, dy, mag = outputs[-1]
-            # Combine into a single tensor
-            blur_field = torch.cat([dx, dy, mag], dim=1)
+    # Process each image in the test set
+    for i, (input_tensor, original_img, image_path) in enumerate(tqdm(test_loader, desc="Testing")):
+        input_tensor = input_tensor.to(device)
+        
+        # Get original dimensions
+        b, c, h, w = input_tensor.shape
+        
+        # Pad to multiple of 8 if needed
+        factor = 8
+        h_n = (factor - h % factor) % factor
+        w_n = (factor - w % factor) % factor
+        input_tensor = torch.nn.functional.pad(input_tensor, (0, w_n, 0, h_n), mode='reflect')
+        
+        # Forward pass
+        logging.info(f"Running model inference for image {i+1}/{len(test_loader)}...")
+        outputs = net(input_tensor)
+        
+        # Process output (assuming the model returns a list of outputs at different resolutions)
+        # We use the highest resolution output (last in the list)
+        if isinstance(outputs, list) and len(outputs) > 0:
+            if isinstance(outputs[-1], tuple) and len(outputs[-1]) == 3:
+                # If output is (dx, dy, mag) tuple
+                dx, dy, mag = outputs[-1]
+                # Combine into a single tensor
+                blur_field = torch.cat([dx, dy, mag], dim=1)
+            else:
+                # If output is already a tensor
+                blur_field = outputs[-1]
         else:
             # If output is already a tensor
-            blur_field = outputs[-1]
-    else:
-        # If output is already a tensor
-        blur_field = outputs
-    
-    # Crop to original size
-    blur_field = blur_field[:, :, :h, :w]
-    
-    # Generate base name for output files
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    
-    # Visualize using the new function with color wheel legend
-    vis_path = os.path.join(output_dir, f"{base_name}_blur_field.png")
-    
-    # Create a temporary tensor path for visualization
-    import tempfile
-    with tempfile.NamedTemporaryFile(suffix='.pt') as tmp:
-        tensor_path = tmp.name
-        torch.save(blur_field[0].cpu(), tensor_path)
+            blur_field = outputs
         
-        # Visualize the blur field
-        visualize_blur_field_with_legend(tensor_path, image_path, output_path=vis_path, 
-                                        title="Blur Condition Field")
+        # Crop to original size
+        blur_field = blur_field[:, :, :h, :w]
+        
+        # Generate base name for output files
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        
+        # Visualize using the new function with color wheel legend
+        vis_path = os.path.join(args.output_dir, f"{base_name}_blur_field.png")
+        
+        # Create a temporary tensor path for visualization
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.pt') as tmp:
+            tensor_path = tmp.name
+            torch.save(blur_field[0].cpu(), tensor_path)
+            
+            # Visualize the blur field
+            visualize_blur_field_with_legend(tensor_path, image_path, output_path=vis_path, 
+                                            title="Blur Condition Field")
+        
+        logging.info(f"Saved blur field visualization to: {vis_path}")
     
-    print(f"Saved blur field visualization to: {vis_path}")
-    print("Done!")
-    
-    return vis_path
+    logging.info("Testing completed!")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test MIMO-UNet blur field prediction on a single image")
