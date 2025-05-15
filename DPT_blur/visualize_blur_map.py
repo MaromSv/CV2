@@ -5,7 +5,7 @@ import argparse
 import os
 import cv2 # Import OpenCV
 
-def visualize_blur_map(tensor_path, image_path=None, quiver_step=16):
+def visualize_blur_map(tensor_path, image_path=None, quiver_step=16, output_path=None):
     """Loads a saved blur vector (bx, by) tensor and visualizes its calculated magnitude, orientation, and the vector field itself, optionally superimposed on the original image."""
 
     if not os.path.exists(tensor_path):
@@ -159,7 +159,14 @@ def visualize_blur_map(tensor_path, image_path=None, quiver_step=16):
 
     plt.suptitle(f'Blur Vector Visualization ({os.path.basename(tensor_path)})', fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.92]) # Adjusted rect to accommodate suptitle with subplots_adjust
-    plt.show()
+    
+    # Save to file if output_path is provided, otherwise show
+    if output_path:
+        print(f"Saving visualization to {output_path}")
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+    else:
+        plt.show()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize a saved blur vector tensor (bx, by) by calculating and showing magnitude, orientation, and the vector field itself, optionally superimposed on the original image.")
@@ -169,3 +176,201 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     visualize_blur_map(args.input_file, image_path=args.image_path, quiver_step=args.step) 
+
+def create_color_wheel(size=200, with_labels=True):
+    """Create a color wheel to visualize orientation and magnitude mapping."""
+    # Create a white background
+    wheel = np.ones((size, size, 3))
+    
+    # Create a grid of coordinates
+    y, x = np.ogrid[0:size, 0:size]
+    
+    # Center coordinates
+    center_y, center_x = size // 2, size // 2
+    
+    # Calculate distance from center and angle
+    y = y - center_y
+    x = x - center_x
+    
+    # Calculate radius and angle
+    radius = np.sqrt(x*x + y*y)
+    angle = np.arctan2(y, x)  # Range: [-pi, pi]
+    
+    # Normalize radius to [0, 1]
+    max_radius = size // 2
+    radius_norm = np.clip(radius / max_radius, 0, 1)
+    
+    # Convert angle to hue (0-1 range)
+    hue = (angle + np.pi) / (2 * np.pi)  # Range: [0, 1]
+    
+    # Create HSV image
+    hsv = np.zeros((size, size, 3))
+    hsv[:, :, 0] = hue  # Hue = orientation
+    hsv[:, :, 1] = np.ones_like(radius)  # Full saturation
+    hsv[:, :, 2] = np.ones_like(radius)  # Full value
+    
+    # Convert HSV to RGB
+    import matplotlib.colors as mcolors
+    colored_wheel = mcolors.hsv_to_rgb(hsv)
+    
+    # Create a circular mask
+    mask = radius_norm <= 1.0
+    
+    # Apply mask - colored wheel on white background
+    wheel = np.where(mask[:, :, np.newaxis], colored_wheel, wheel)
+    
+    # Add a black border
+    border_mask = (radius_norm > 0.95) & (radius_norm <= 1.0)
+    wheel[border_mask] = [1, 1, 1]
+    
+    return wheel
+
+def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=None, title="Blur Condition Field"):
+    """
+    Visualizes a blur field tensor with a color wheel legend showing orientation and magnitude.
+    
+    Args:
+        tensor_path: Path to the saved blur tensor (.pt file)
+        image_path: Optional path to the original image
+        output_path: Path to save the visualization
+        title: Title for the visualization
+    """
+    if not os.path.exists(tensor_path):
+        print(f"Error: File not found at {tensor_path}")
+        return
+    
+    try:
+        # Load the tensor
+        blur_map_tensor = torch.load(tensor_path, map_location=torch.device('cpu'))
+        print(f"Loaded tensor from {tensor_path} with shape: {blur_map_tensor.shape}")
+        
+        if not isinstance(blur_map_tensor, torch.Tensor):
+            raise TypeError("Loaded object is not a torch.Tensor")
+        if blur_map_tensor.dim() != 3 or blur_map_tensor.shape[0] != 3:
+            raise ValueError(f"Expected tensor shape (3, H, W) for (bx, by, magnitude), but got {blur_map_tensor.shape}")
+        
+        # Detach and convert to numpy
+        blur_map_np = blur_map_tensor.detach().cpu().numpy()
+        
+    except Exception as e:
+        print(f"Error loading or processing tensor from {tensor_path}: {e}")
+        return
+    
+    # Extract components
+    bx = blur_map_np[0, :, :]
+    by = blur_map_np[1, :, :]
+    magnitude_map = blur_map_np[2, :, :]
+    H, W = bx.shape
+    
+    # Calculate orientation (angle) from bx and by
+    orientation_map = np.arctan2(by, bx)  # Range: [-pi, pi]
+    
+    # Create figure with two parts: legend and visualization
+    fig = plt.figure(figsize=(12, 5))
+    
+    # Create a GridSpec to control the layout
+    gs = plt.GridSpec(1, 4, width_ratios=[1, 1, 1, 1])
+    
+    # Add the color wheel legend
+    ax_legend = fig.add_subplot(gs[0, 0])
+    
+    # Create and display the color wheel
+    wheel = create_color_wheel(size=200)
+    ax_legend.imshow(wheel)
+    
+    # Add title above the color wheel
+    plt.figtext(0.16, 0.88, title, ha='center', fontsize=15, fontweight='bold')
+    
+    # Add orientation labels
+    radius = 110
+    ax_legend.text(100, 100-radius-10, "90°", ha='center', va='center', fontweight='bold', color='black')
+    ax_legend.text(100+radius+10, 100, "0°", ha='center', va='center', fontweight='bold', color='black')
+    ax_legend.text(100, 100+radius+10, "270°", ha='center', va='center', fontweight='bold', color='black')
+    ax_legend.text(100-radius-10, 100, "180°", ha='center', va='center', fontweight='bold', color='black')
+    
+    # Add diagonal line for magnitude and orientation with arrows
+    center = 100  # Center of the wheel
+    arrow_length = 60  # Length of each arrow from center
+    
+    # Draw arrows from center in both directions
+    ax_legend.arrow(center, center, arrow_length*0.7, -arrow_length*0.7, 
+                   head_width=8, head_length=10, fc='k', ec='k', 
+                   linewidth=2, length_includes_head=True)
+    
+    # Add curved text for orientation along the line
+    import matplotlib.patheffects as path_effects
+    
+    # Create a path for the text to follow
+    from matplotlib.path import Path
+    from matplotlib.patches import PathPatch
+    
+    # Add "Magnitude" text along the line
+    ax_legend.text(100, 80, "Magnitude", ha='center', va='center', fontweight='bold', rotation=45, color='black')
+    
+    # Add "Orientation" text curved around the edge
+    angle = 45  # Position at 45 degrees (top-right)
+    x = 100 + 80 * np.cos(np.radians(angle))
+    y = 100 - 80 * np.sin(np.radians(angle))
+    ax_legend.text(x+20, y-20, "Orientation", ha='center', va='center', fontweight='bold',
+                  rotation=-45, color='black')
+    
+    ax_legend.axis('off')
+    
+    # Create the blur field visualization
+    # Normalize orientation to [0, 1] for Hue
+    hue = (orientation_map + np.pi) / (2 * np.pi)
+    
+    # Normalize magnitude to [0, 1] for Saturation
+    mag_max = np.max(magnitude_map) if np.max(magnitude_map) > 0 else 1.0
+    saturation = magnitude_map / mag_max
+    saturation = np.clip(saturation, 0, 1)
+    
+    # Value channel (brightness) at maximum
+    value = np.ones_like(magnitude_map)
+    
+    # Stack H, S, V channels and convert to RGB
+    hsv_image = np.stack([hue, saturation, value], axis=-1)
+    
+    # Convert HSV to RGB
+    import matplotlib.colors as mcolors
+    rgb_image = mcolors.hsv_to_rgb(hsv_image)
+    
+    # Load original image if provided
+    original_image = None
+    if image_path and os.path.exists(image_path):
+        try:
+            import cv2
+            original_image = cv2.imread(image_path)
+            original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+            original_image = cv2.resize(original_image, (W, H))
+            
+            # Blend original image with blur field
+            alpha = 0.7  # Transparency of the blur field
+            rgb_image = alpha * rgb_image + (1 - alpha) * original_image / 255.0
+            rgb_image = np.clip(rgb_image, 0, 1)
+            
+        except Exception as e:
+            print(f"Error loading original image: {e}")
+    
+    # Display the blur field visualization
+    ax_vis = fig.add_subplot(gs[0, 1:])
+    ax_vis.imshow(rgb_image)
+    
+    # Use the image name as the title (without .pt extension)
+    image_title = os.path.basename(tensor_path)
+    if image_title.endswith('.pt'):
+        image_title = image_title[:-3]  # Remove .pt extension
+    ax_vis.set_title(image_title, fontsize=12)
+    ax_vis.axis('off')
+    
+    plt.tight_layout()
+    
+    # Save or display the figure
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved visualization to {output_path}")
+    else:
+        plt.show()
+    
+    return rgb_image
