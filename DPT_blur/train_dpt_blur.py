@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchvision.transforms import Compose
 import torchvision.transforms.functional as TF
+import torch.nn.functional as F_nn
 import numpy as np
 import cv2
 import os
@@ -28,6 +29,12 @@ from data_loader import BlurMapDataset
 
 # --- Import Model Creation Utility ---
 from model_utils import create_dpt_blur_model
+
+# --- Define collate_fn at the top level ---
+def collate_fn_skip_none(batch):
+    batch = list(filter(lambda x: x is not None, batch))
+    if not batch: return None # Return None if the whole batch is invalid
+    return torch.utils.data.dataloader.default_collate(batch)
 
 # --- Training Function ---
 
@@ -54,7 +61,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             outputs = model(inputs)
 
             if outputs.shape[-2:] != targets.shape[-2:]:
-                 outputs_resized = TF.interpolate(outputs, size=targets.shape[-2:], mode='bilinear', align_corners=False)
+                 outputs_resized = F_nn.interpolate(outputs, size=targets.shape[-2:], mode='bilinear', align_corners=False)
             else:
                  outputs_resized = outputs
 
@@ -98,7 +105,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 
                 if outputs.shape[-2:] != targets.shape[-2:]:
                      print(f"Warning: Output shape {outputs.shape[-2:]} does not match target shape {targets.shape[-2:]}. Interpolating outputs.")
-                     outputs_resized = TF.interpolate(outputs, size=targets.shape[-2:], mode='bilinear', align_corners=False)
+                     outputs_resized = F_nn.interpolate(outputs, size=targets.shape[-2:], mode='bilinear', align_corners=False)
                 else:
                      outputs_resized = outputs
 
@@ -169,18 +176,17 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Fine-tune DPT model for blur map prediction.")
     # Data Args
-    parser.add_argument('--blurred_dir_train', type=str, required=False, default='data/', help='Directory containing blurred training images.')
-    parser.add_argument('--gt_dir_train', type=str, required=True, help='Directory containing training ground truth .npy blur maps.')
-    parser.add_argument('--blurred_dir_val', type=str, required=True, help='Directory containing blurred validation images.')
-    parser.add_argument('--gt_dir_val', type=str, required=True, help='Directory containing validation ground truth .npy blur maps.')
+    parser.add_argument('--dataset_dir', type=str, required=True, 
+                        help='Base directory of the restructured dataset (e.g., data/dataset_DPT_blur/), \
+                              which should contain train/blur, train/condition, val/blur, val/condition subdirectories.')
     # Model Args
     parser.add_argument('--weights', type=str, default='weights/dpt_large-ade20k-b12dca68.pt', help='Path to pre-trained DPT segmentation weights (.pt file) for backbone initialization.')
-    parser.add_argument('--model_type', type=str, default='dpt_hybrid', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
+    parser.add_argument('--model_type', type=str, default='dpt_large', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
     parser.add_argument('--img_size', type=int, default=384, help='Image size to resize to for DPT input.')
     parser.add_argument('--output_channels', type=int, default=3, help='Number of output channels (must be 3 for bx, by, magnitude).')
     # Training Args
     parser.add_argument('--epochs', type=int, default=50, help='Total number of training epochs.')
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size for training.')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training.')
     parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate.')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for DataLoader.')
     # Checkpoint Args
@@ -216,20 +222,23 @@ if __name__ == "__main__":
     # TODO: Define target_transform if GT needs normalization/scaling
     target_transform = None
 
+    # Construct full paths from the base dataset directory
+    blurred_dir_train = os.path.join(args.dataset_dir, 'train', 'blur')
+    gt_dir_train = os.path.join(args.dataset_dir, 'train', 'condition')
+    blurred_dir_val = os.path.join(args.dataset_dir, 'val', 'blur')
+    gt_dir_val = os.path.join(args.dataset_dir, 'val', 'condition')
+
     # Datasets
     print("Setting up datasets...")
     try:
-        train_dataset_full = BlurMapDataset(args.blurred_dir_train, args.gt_dir_train, transform=dpt_transform, target_transform=target_transform, crop_size=args.img_size, is_train=True)
-        val_dataset_full = BlurMapDataset(args.blurred_dir_val, args.gt_dir_val, transform=dpt_transform, target_transform=target_transform, crop_size=None, is_train=False)
+        train_dataset_full = BlurMapDataset(blurred_dir_train, gt_dir_train, transform=dpt_transform, target_transform=target_transform, crop_size=args.img_size, is_train=True, random_flip=True)
+        val_dataset_full = BlurMapDataset(blurred_dir_val, gt_dir_val, transform=dpt_transform, target_transform=target_transform, crop_size=args.img_size, is_train=False, random_flip=False)
     except FileNotFoundError as e:
         print(f"Error initializing dataset: {e}")
         exit()
 
     # Create a collate_fn to handle None values returned by __getitem__
-    def collate_fn_skip_none(batch):
-        batch = list(filter(lambda x: x is not None, batch))
-        if not batch: return None # Return None if the whole batch is invalid
-        return torch.utils.data.dataloader.default_collate(batch)
+    # collate_fn_skip_none is now defined at the top level
 
     # DataLoaders
     use_pin_memory = True if device.type == 'cuda' else False
@@ -253,7 +262,7 @@ if __name__ == "__main__":
     # Loss and Optimizer
     criterion = nn.MSELoss()
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=5)
 
     # --- Resume from Checkpoint --- 
     if args.resume:
