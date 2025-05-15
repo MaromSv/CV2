@@ -8,16 +8,18 @@ from dpt_lib.blocks import Interpolate
 import cv2
 import os
 
-def run_dpt_blur_prediction(tensor, model_path, output_channels=3, model_type="dpt_hybrid", optimize=True, print_shapes=False):
+def run_dpt_blur_prediction(tensor, model_path, finetuned_head_path=None, output_channels=3, model_type="dpt_hybrid", optimize=True, print_shapes=False):
     """Run DPT model adapted for blur vector (bx, by) and magnitude prediction on a tensor.
 
-    Loads a pre-trained DPT model, replaces its head
-    for regression, and predicts a 3-channel map representing the
-    X and Y components of the blur vector and the blur magnitude at each pixel.
+    Loads a DPT model, initializes its backbone with weights from model_path,
+    defines a regression head, and optionally loads fine-tuned weights for this head
+    from finetuned_head_path.
 
     Args:
         tensor (torch.Tensor): Input tensor of shape (B, C, H, W).
-        model_path (str): Path to the pre-trained DPT model weights.
+        model_path (str): Path to the DPT backbone model weights (e.g., dpt_large-ade20k-b12dca68.pt).
+        finetuned_head_path (str, optional): Path to the checkpoint containing the fine-tuned head_state_dict.
+                                              Defaults to None.
         output_channels (int): Number of output channels (MUST be 3 for bx, by, magnitude). Defaults to 3.
         model_type (str): DPT model type ("dpt_large" or "dpt_hybrid"). Defaults to "dpt_hybrid".
         optimize (bool): Whether to use optimization for CUDA/MPS. Defaults to True.
@@ -73,16 +75,30 @@ def run_dpt_blur_prediction(tensor, model_path, output_channels=3, model_type="d
     if missing_keys and any(not (k.startswith("scratch.output_conv.") or k.startswith("auxlayer.")) for k in missing_keys):
         print(f"Warning: Missing non-head keys: {[k for k in missing_keys if not (k.startswith('scratch.output_conv.') or k.startswith('auxlayer.'))]}")
 
-
     # Replace the head with a new regression head
     model.scratch.output_conv = nn.Sequential(
-            nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1), # Mimic first part of original depth head
+            nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1),
             Interpolate(scale_factor=2, mode="bilinear", align_corners=True),
             nn.Conv2d(features // 2, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(True),
-            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0), # Final conv to output_channels
+            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0),
         )
-    print(f"Replaced model head for {output_channels}-channel regression.")
+    print(f"Defined model head for {output_channels}-channel regression.")
+
+    # Load fine-tuned head weights if path is provided
+    if finetuned_head_path:
+        print(f"Loading fine-tuned head weights from: {finetuned_head_path}")
+        if os.path.exists(finetuned_head_path):
+            head_checkpoint = torch.load(finetuned_head_path, map_location="cpu")
+            if "head_state_dict" in head_checkpoint:
+                model.scratch.output_conv.load_state_dict(head_checkpoint["head_state_dict"])
+                print("Successfully loaded fine-tuned head weights into model.scratch.output_conv.")
+            else:
+                print(f"Warning: 'head_state_dict' not found in checkpoint {finetuned_head_path}. Fine-tuned head weights NOT loaded.")
+        else:
+            print(f"Warning: Fine-tuned head weights file not found at {finetuned_head_path}. Fine-tuned head weights NOT loaded.")
+    else:
+        print("No fine-tuned head path provided. Using randomly initialized head (after backbone loading).")
 
     # --- Model Summary / Layer Shapes (Optional) ---
     if print_shapes:
@@ -167,10 +183,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Run DPT model for blur quantification on an image.")
-    parser.add_argument('--image_path', type=str, default='data/GOPRO_Large/test/GOPR0384_11_00/blur/000001.png', help='Path to the input image file.')
-    parser.add_argument('--weights', type=str, default="weights/dpt_large-ade20k-b12dca68.pt", help='Path to pre-trained DPT model weights (.pt file).')
+    parser.add_argument('--image_path', type=str, default='data/dataset_DPT_blur/train/blur/image_0000112.png', help='Path to the input image file.')
+    parser.add_argument('--weights', type=str, default="weights/dpt_large-ade20k-b12dca68.pt", help='Path to pre-trained DPT BACKBONE model weights (.pt file).')
+    parser.add_argument('--finetuned_head_path', type=str, default=None, help='Optional path to the checkpoint (.pth) containing the fine-tuned head_state_dict.')
     parser.add_argument('--model_type', type=str, default='dpt_large', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
-    parser.add_argument('--output_file', type=str, default='results/output_blur_map.pt', help='Path to save the output blur map tensor.')
+    parser.add_argument('--output_dir', type=str, default='results/', help='Directory to save the output blur map tensor.')
     parser.add_argument('--print_shapes', action='store_true', help='Print model layer shapes during inference.')
     parser.add_argument('--no_optimize', action='store_true', help='Disable optimizations (memory format).')
     args = parser.parse_args()
@@ -232,7 +249,8 @@ if __name__ == "__main__":
     # Run blur prediction
     blur_predictions = run_dpt_blur_prediction(
         input_tensor, # Use the processed image tensor
-        model_path=args.weights,
+        model_path=args.weights, # This is for the DPT backbone
+        finetuned_head_path=args.finetuned_head_path, # Path for the trained head
         output_channels=3, # Must be 3 for (bx, by, magnitude)
         model_type=args.model_type,
         optimize=not args.no_optimize,
@@ -240,15 +258,23 @@ if __name__ == "__main__":
     )
 
     # Ensure the output directory exists
-    output_dir = os.path.dirname(args.output_file)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Save the output tensor (only the first item in the batch)
+    # Construct output filename based on input image name
+    input_image_basename = os.path.splitext(os.path.basename(args.image_path))[0]
+    output_filename = f"{input_image_basename}_blur_map.pt"
+    full_output_path = os.path.join(output_dir, output_filename)
+
+    # Save the output tensor and original image path as a dictionary
     output_tensor_to_save = blur_predictions[0].cpu() # Move to CPU before saving
+    data_to_save = {
+        'blur_map_tensor': output_tensor_to_save,
+        'original_image_path': args.image_path # Store the full path of the input image
+    }
     try:
-        torch.save(output_tensor_to_save, args.output_file)
-        print(f"Output blur map saved to: {args.output_file}")
-        print(f"Saved tensor shape: {output_tensor_to_save.shape}") # Should be (3, H_processed, W_processed)
+        torch.save(data_to_save, full_output_path)
+        print(f"Output blur map and metadata saved to: {full_output_path}")
+        print(f"Saved tensor shape: {output_tensor_to_save.shape}")
     except Exception as e:
-        print(f"Error saving output tensor to {args.output_file}: {e}") 
+        print(f"Error saving output tensor to {full_output_path}: {e}") 
