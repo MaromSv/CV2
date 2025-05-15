@@ -17,8 +17,8 @@ from MIMOUNet import build_MIMOUnet_net
 # Define global variable for the original image
 original_img = None
 
-def create_direction_wheel(ax, title="Direction Color Wheel"):
-    """Create a color wheel to show the mapping between direction and color"""
+def create_direction_wheel_with_magnitude(ax, title="Blur Condition Field"):
+    """Create a color wheel to show the mapping between direction and color with magnitude indicator"""
     # Create a circle with colored segments
     n = 100  # Number of segments
     theta = np.linspace(0, 2*np.pi, n)
@@ -41,19 +41,27 @@ def create_direction_wheel(ax, title="Direction Color Wheel"):
     ax.scatter(xx, yy, c=rgb.reshape(-1, 3), s=50)
     
     # Add a circle outline
-    circle = Circle((0, 0), 1, fill=False, edgecolor='black')
+    circle = Circle((0, 0), 1, fill=False, edgecolor='black', linewidth=2)
     ax.add_patch(circle)
     
-    # Add direction labels
-    ax.text(0, 1.1, "Up", ha='center', va='center')
-    ax.text(0, -1.1, "Down", ha='center', va='center')
-    ax.text(1.1, 0, "Right", ha='center', va='center')
-    ax.text(-1.1, 0, "Left", ha='center', va='center')
+    # Add direction labels with degrees
+    ax.text(0, 1.2, "90°", ha='center', va='center', fontweight='bold')
+    ax.text(0, -1.2, "270°", ha='center', va='center', fontweight='bold')
+    ax.text(1.2, 0, "0°", ha='center', va='center', fontweight='bold')
+    ax.text(-1.2, 0, "180°", ha='center', va='center', fontweight='bold')
     
-    ax.set_xlim(-1.2, 1.2)
-    ax.set_ylim(-1.2, 1.2)
+    # Add magnitude arrow
+    ax.arrow(0, 0, 0.7, 0, head_width=0.1, head_length=0.1, fc='black', ec='black', linewidth=2)
+    ax.text(0.35, 0.15, "Magnitude", ha='center', va='center', fontweight='bold')
+    ax.text(0.35, -0.15, "→", ha='center', va='center', fontweight='bold')
+    
+    # Add orientation label
+    ax.text(0, 0.5, "Orientation", ha='center', va='center', rotation=90, fontweight='bold')
+    
+    ax.set_xlim(-1.3, 1.3)
+    ax.set_ylim(-1.3, 1.3)
     ax.set_aspect('equal')
-    ax.set_title(title)
+    ax.set_title(title, fontweight='bold', fontsize=14)
     ax.axis('off')
 
 def visualize_blur_field(dx, dy, mag, save_path, title_prefix=""):
@@ -241,6 +249,61 @@ def visualize_all_resolutions(dx_list, dy_list, mag_list, img_list, res_names, s
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
     print(f"Combined visualization saved to {save_path} and {legend_path}")
 
+def visualize_blur_conditions(dx_list, dy_list, mag_list, save_path, condition_names=None):
+    """Create a visualization similar to the reference image with color wheel and conditions"""
+    if condition_names is None:
+        condition_names = [f"Condition {chr(65+i)}" for i in range(len(dx_list))]
+    
+    # Create figure with color wheel on left and conditions on right
+    fig = plt.figure(figsize=(15, 5))
+    
+    # Create grid spec for layout
+    gs = plt.GridSpec(1, len(dx_list) + 1, width_ratios=[1] + [1] * len(dx_list))
+    
+    # Add color wheel
+    ax_wheel = fig.add_subplot(gs[0, 0])
+    create_direction_wheel_with_magnitude(ax_wheel, title="Blur Condition Field")
+    
+    # Process each condition
+    for i, (dx, dy, mag, name) in enumerate(zip(dx_list, dy_list, mag_list, condition_names)):
+        # Convert tensors to numpy arrays
+        dx_np = dx.squeeze().cpu().numpy()
+        dy_np = dy.squeeze().cpu().numpy()
+        mag_np = mag.squeeze().cpu().numpy()
+        
+        # Calculate direction angle in radians
+        angle = np.arctan2(dy_np, dx_np)
+        
+        # Normalize angle to [0, 1] for hue
+        hue = (angle / (2 * np.pi)) % 1.0
+        
+        # Normalize magnitude to [0, 1] for value/brightness
+        mag_normalized = np.clip(mag_np, -0.5, 0.5)
+        mag_normalized = (mag_normalized + 0.5)  # Now in range [0, 1]
+        
+        # Create HSV image (hue=direction, saturation=1, value=magnitude)
+        hsv = np.zeros((hue.shape[0], hue.shape[1], 3))
+        hsv[:, :, 0] = hue
+        hsv[:, :, 1] = 1.0  # Full saturation
+        hsv[:, :, 2] = mag_normalized
+        
+        # Convert HSV to RGB
+        rgb = mcolors.hsv_to_rgb(hsv)
+        
+        # Add condition subplot
+        ax_cond = fig.add_subplot(gs[0, i+1])
+        ax_cond.imshow(rgb)
+        ax_cond.set_title(name, fontweight='bold', fontsize=14)
+        ax_cond.axis('off')
+    
+    # Add arrows connecting wheel to conditions
+    for i in range(len(dx_list)):
+        fig.text(0.25 + i*0.2, 0.05, "↓", ha='center', va='center', fontsize=20)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Blur conditions visualization saved to {save_path}")
+
 @torch.no_grad()
 def test_blur_field(image_path, output_dir, device='cuda'):
     # Create output directory
@@ -274,13 +337,6 @@ def test_blur_field(image_path, output_dir, device='cuda'):
     # Forward pass
     outputs = net(input_tensor)
     
-    # Debug: Print the output structure
-    # print(f"Output type: {type(outputs)}")
-    # print(f"Output length: {len(outputs)}")
-    # for i, out in enumerate(outputs):
-    #     print(f"Output[{i}] type: {type(out)}")
-    #     print(f"Output[{i}] shape: {out.shape if hasattr(out, 'shape') else 'No shape'}")
-    
     # Process all three resolution levels
     base_name = os.path.splitext(os.path.basename(image_path))[0]
     
@@ -309,14 +365,14 @@ def test_blur_field(image_path, output_dir, device='cuda'):
         output = outputs[i]  # Get output at this resolution
         
         # Split channels
-        dx = output[:, 0:1, :, :].clamp(-0.5, 0.5)
-        dy = output[:, 1:2, :, :].clamp(-0.5, 0.5)
-        mag = output[:, 2:3, :, :].clamp(-0.5, 0.5)
+        dx = output[0].clamp(-0.5, 0.5)
+        dy = output[1].clamp(-0.5, 0.5)
+        mag = output[2].clamp(-0.5, 0.5)
         
         # Store for combined visualization
-        dx_list.append(dx[0, 0])
-        dy_list.append(dy[0, 0])
-        mag_list.append(mag[0, 0])
+        dx_list.append(dx[0])
+        dy_list.append(dy[0])
+        mag_list.append(mag[0])
         res_names.append(res_name)
         
         # Create a resized version of the original image for visualization
@@ -337,12 +393,12 @@ def test_blur_field(image_path, output_dir, device='cuda'):
         
         # Save visualization for this resolution
         vis_path = os.path.join(output_dir, res_name, f"{base_name}_blur_field.png")
-        visualize_blur_field(dx[0, 0], dy[0, 0], mag[0, 0], vis_path, 
+        visualize_blur_field(dx[0], dy[0], mag[0], vis_path, 
                             title_prefix=f"{res_name.replace('_', ' ').title()}: ")
         
         # Save direction-color visualization
         dir_color_path = os.path.join(output_dir, res_name, f"{base_name}_direction_color.png")
-        visualize_direction_color(dx[0, 0], dy[0, 0], mag[0, 0], original_img, dir_color_path,
+        visualize_direction_color(dx[0], dy[0], mag[0], original_img, dir_color_path,
                                  title=f"{res_name.replace('_', ' ').title()}")
         
         # Restore original image if we changed it
@@ -352,6 +408,11 @@ def test_blur_field(image_path, output_dir, device='cuda'):
     # Create combined visualization of all resolutions
     combined_path = os.path.join(output_dir, 'combined', f"{base_name}_all_resolutions.png")
     visualize_all_resolutions(dx_list, dy_list, mag_list, img_list, res_names, combined_path)
+    
+    # Create blur conditions visualization (similar to reference image)
+    conditions_path = os.path.join(output_dir, 'combined', f"{base_name}_blur_conditions.png")
+    condition_names = ["Low Resolution", "Mid Resolution", "High Resolution"]
+    visualize_blur_conditions(dx_list, dy_list, mag_list, conditions_path, condition_names)
     
     print(f"Inference completed. Results saved to {output_dir}")
 
