@@ -11,13 +11,27 @@ from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-# Add parent directory to path for imports
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(parent_dir)
+# Add grandparent directory to path for imports
+current_dir = os.path.dirname(os.path.abspath(__file__))  # MIMO_UNet directory
+parent_dir = os.path.dirname(current_dir)                 # ID-Blau directory
+grandparent_dir = os.path.dirname(parent_dir)             # CODE directory containing both ID-Blau and DPT_blur
+sys.path.append(grandparent_dir)
+
+# Print paths for debugging
+print(f"Current directory: {current_dir}")
+print(f"Parent directory: {parent_dir}")
+print(f"Grandparent directory: {grandparent_dir}")
+print(f"Python path: {sys.path}")
 
 # Import from DPT_blur
-from DPT_blur.data_loader import BlurMapDataset
-from DPT_blur.visualize_blur_map import visualize_blur_field_with_legend
+try:
+    from DPT_blur.data_loader import BlurMapDataset
+    from DPT_blur.visualize_blur_map import visualize_blur_field_with_legend
+    print("Successfully imported DPT_blur modules")
+except ImportError as e:
+    print(f"Error importing DPT_blur modules: {e}")
+    print("Please make sure DPT_blur is in the same directory as ID-Blau")
+    sys.exit(1)
 
 # Import MIMO-UNet model and custom loss
 from MIMOUNet import build_MIMOUnet_net
@@ -49,6 +63,14 @@ def train_model(args):
         crop_size=args.crop_size
     )
     
+    # Limit dataset size if specified
+    if args.max_train_samples is not None and args.max_train_samples < len(train_dataset):
+        logging.info(f"Limiting training dataset to {args.max_train_samples} samples (from {len(train_dataset)})")
+        # Create a subset of the dataset
+        from torch.utils.data import Subset
+        indices = list(range(args.max_train_samples))
+        train_dataset = Subset(train_dataset, indices)
+    
     val_dataset = BlurMapDataset(
         root_dir=args.val_dir,
         transform=None,
@@ -76,9 +98,7 @@ def train_model(args):
     
     # Create model
     model = build_MIMOUnet_net(
-        n_input=3,  # RGB image input
-        n_output=3,  # bx, by, magnitude output
-        base_channels=args.base_channels
+        model_name=args.model_name  # Use the model name from arguments
     )
     model = model.to(device)
     logging.info(f"Model created: {model.__class__.__name__}")
@@ -101,8 +121,7 @@ def train_model(args):
         optimizer,
         mode='min',
         factor=0.5,
-        patience=5,
-        verbose=True
+        patience=5
     )
     
     # Initialize tracking variables
@@ -362,6 +381,9 @@ if __name__ == '__main__':
     
     # Model parameters
     parser.add_argument('--base_channels', type=int, default=64, help='Base number of channels in MIMO-UNet')
+    parser.add_argument('--model_name', type=str, default='MIMO-UNetPlus', 
+                        choices=['MIMO-UNet', 'MIMO-UNetPlus'], 
+                        help='Model variant to use')
     
     # Training parameters
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
@@ -379,6 +401,9 @@ if __name__ == '__main__':
     parser.add_argument('--save_freq', type=int, default=10, help='Checkpoint save frequency (epochs)')
     parser.add_argument('--resume', type=str, default='', help='Path to checkpoint to resume from')
     parser.add_argument('--patience', type=int, default=20, help='Early stopping patience')
+    
+    # Add max_train_samples argument
+    parser.add_argument('--max_train_samples', type=int, default=None, help='Maximum number of training samples to use')
     
     args = parser.parse_args()
     
