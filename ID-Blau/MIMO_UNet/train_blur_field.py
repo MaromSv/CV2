@@ -35,7 +35,7 @@ except ImportError as e:
 
 # Import MIMO-UNet model and custom loss
 from MIMOUNet import build_MIMOUnet_net
-from blur_losses import BlurFieldLoss, CharbonnierLoss
+from blur_losses import MultiScaleBlurFieldLoss, BlurFieldLoss
 
 def train_model(args):
     # Set up logging
@@ -104,10 +104,21 @@ def train_model(args):
     logging.info(f"Model created: {model.__class__.__name__}")
     
     # Define loss function
-    criterion = BlurFieldLoss(
-        lambda_dir=args.lambda_dir,
-        lambda_mag=args.lambda_mag
-    )
+    if args.use_multi_scale_loss:
+        # Create base criterion
+        base_criterion = BlurFieldLoss(lambda_dir=0.5, lambda_mag=0.5)
+        
+        # Create multi-scale loss
+        criterion = MultiScaleBlurFieldLoss(
+            base_criterion=base_criterion,
+            use_consistency=True,
+            consistency_weight=args.consistency_weight
+        )
+        logging.info("Using multi-scale loss with consistency")
+    else:
+        # Use standard loss
+        criterion = BlurFieldLoss(lambda_dir=0.5, lambda_mag=0.5)
+        logging.info("Using standard blur field loss")
     
     # Define optimizer
     optimizer = optim.Adam(
@@ -165,15 +176,40 @@ def train_model(args):
                 optimizer.zero_grad()
                 outputs = model(blur_img)
                 
-                # Handle multi-scale outputs if present
-                if isinstance(outputs, list):
-                    # Use the highest resolution output
+                # Compute loss based on output type
+                if isinstance(outputs, list) and args.use_multi_scale_loss:
+                    # For multi-scale outputs with multi-scale loss
+                    
+                    # Get adaptive scale weights based on training progress
+                    if args.adaptive_weights:
+                        progress = epoch / args.epochs
+                        if progress < 0.2:
+                            scale_weights = [0.5, 0.3, 0.2]  # Early: focus on low resolution
+                        elif progress < 0.5:
+                            scale_weights = [0.3, 0.4, 0.3]  # Mid: balanced focus
+                        elif progress < 0.8:
+                            scale_weights = [0.2, 0.3, 0.5]  # Later: focus on high resolution
+                        else:
+                            scale_weights = [0.1, 0.3, 0.6]  # Final: heavy focus on high resolution
+                    
+                    # Update loss function weights
+                    criterion.update_scale_weights(scale_weights)
+                    
+                    # Compute multi-scale loss
+                    loss, losses_dict = criterion(outputs, blur_field)
+                    
+                    # Log individual losses
+                    if writer is not None:
+                        for loss_name, loss_value in losses_dict.items():
+                            writer.add_scalar(f'Loss/{loss_name}', loss_value, 
+                                             epoch * len(train_loader) + batch_idx)
+                elif isinstance(outputs, list):
+                    # For multi-scale outputs with standard loss (use only highest resolution)
                     pred = outputs[-1]
+                    loss = criterion(pred, blur_field)
                 else:
-                    pred = outputs
-                
-                # Compute loss
-                loss = criterion(pred, blur_field)
+                    # For single output
+                    loss = criterion(outputs, blur_field)
                 
                 # Backward pass
                 loss.backward()
@@ -404,6 +440,12 @@ if __name__ == '__main__':
     
     # Add max_train_samples argument
     parser.add_argument('--max_train_samples', type=int, default=None, help='Maximum number of training samples to use')
+    
+    # Add arguments for multi-scale loss
+    parser.add_argument('--use_multi_scale_loss', action='store_true', 
+                        help='Use multi-scale loss for training')
+    parser.add_argument('--consistency_weight', type=float, default=0.1,
+                        help='Weight for consistency loss between scales')
     
     args = parser.parse_args()
     
