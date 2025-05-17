@@ -58,9 +58,11 @@ def train_model(args):
     
     # Create datasets and dataloaders
     train_dataset = BlurMapDataset(
-        root_dir=args.train_dir,
+        blurred_dir=os.path.join(args.train_dir, 'blur'),
+        gt_dir=os.path.join(args.train_dir, 'condition'),
         transform=None,  # Add transforms if needed
-        crop_size=args.crop_size
+        crop_size=args.crop_size,
+        is_train=True
     )
     
     # Limit dataset size if specified
@@ -72,9 +74,11 @@ def train_model(args):
         train_dataset = Subset(train_dataset, indices)
     
     val_dataset = BlurMapDataset(
-        root_dir=args.val_dir,
+        blurred_dir=os.path.join(args.val_dir, 'blur'),
+        gt_dir=os.path.join(args.val_dir, 'condition'),
         transform=None,
-        crop_size=args.crop_size
+        crop_size=args.crop_size,
+        is_train=False
     )
     
     train_loader = DataLoader(
@@ -168,9 +172,18 @@ def train_model(args):
         
         with tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]") as pbar:
             for batch_idx, sample in enumerate(pbar):
-                # Get data
-                blur_img = sample['blur'].to(device)
-                blur_field = sample['blur_field'].to(device)
+                # Check the type of sample and handle accordingly
+                if isinstance(sample, dict):
+                    # Dictionary format
+                    blur_img = sample['blur'].to(device)
+                    blur_field = sample['blur_field'].to(device)
+                elif isinstance(sample, (list, tuple)) and len(sample) >= 2:
+                    # List/tuple format
+                    blur_img = sample[0].to(device)
+                    blur_field = sample[1].to(device)
+                else:
+                    print(f"Unexpected sample format: {type(sample)}")
+                    continue
                 
                 # Forward pass
                 optimizer.zero_grad()
@@ -237,9 +250,18 @@ def train_model(args):
         with torch.no_grad():
             with tqdm(val_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Val]") as pbar:
                 for batch_idx, sample in enumerate(pbar):
-                    # Get data
-                    blur_img = sample['blur'].to(device)
-                    blur_field = sample['blur_field'].to(device)
+                    # Check the type of sample and handle accordingly
+                    if isinstance(sample, dict):
+                        # Dictionary format
+                        blur_img = sample['blur'].to(device)
+                        blur_field = sample['blur_field'].to(device)
+                    elif isinstance(sample, (list, tuple)) and len(sample) >= 2:
+                        # List/tuple format
+                        blur_img = sample[0].to(device)
+                        blur_field = sample[1].to(device)
+                    else:
+                        print(f"Unexpected sample format: {type(sample)}")
+                        continue
                     
                     # Forward pass
                     outputs = model(blur_img)
