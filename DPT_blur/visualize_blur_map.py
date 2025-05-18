@@ -213,7 +213,7 @@ if __name__ == "__main__":
 
     visualize_blur_map(args.input_file, image_path=args.image_path, quiver_step=args.step) 
 
-def create_color_wheel(size=200, with_labels=True):
+def create_color_wheel(size=200, with_labels=True, saturation=1.0):
     """Create a color wheel to visualize orientation and magnitude mapping."""
     # Create a white background
     wheel = np.ones((size, size, 3))
@@ -242,7 +242,7 @@ def create_color_wheel(size=200, with_labels=True):
     # Create HSV image
     hsv = np.zeros((size, size, 3))
     hsv[:, :, 0] = hue  # Hue = orientation
-    hsv[:, :, 1] = np.ones_like(radius)  # Full saturation
+    hsv[:, :, 1] = saturation * np.ones_like(radius)  # Saturation scaled by parameter
     hsv[:, :, 2] = np.ones_like(radius)  # Full value
     
     # Convert HSV to RGB
@@ -310,8 +310,8 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
     # Add the color wheel legend
     ax_legend = fig.add_subplot(gs[0, 0])
     
-    # Create and display the color wheel
-    wheel = create_color_wheel(size=200)
+    # Create and display the color wheel with reduced saturation to match alpha
+    wheel = create_color_wheel(size=200, saturation=0.5)  # Match alpha value of 0.5
     ax_legend.imshow(wheel)
     
     # Add title above the color wheel
@@ -333,7 +333,7 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
                    head_width=8, head_length=10, fc='k', ec='k', 
                    linewidth=2, length_includes_head=True)
     
-    # Add curved text for orientation along the line
+    # Add "Magnitude" text along the line
     import matplotlib.patheffects as path_effects
     
     # Create a path for the text to follow
@@ -360,6 +360,8 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
     mag_max = np.max(magnitude_map) if np.max(magnitude_map) > 0 else 1.0
     saturation = magnitude_map / mag_max
     saturation = np.clip(saturation, 0, 1)
+    # Reduce saturation to make colors less intense - match alpha value
+    saturation = 0.5 * saturation  # Reduce saturation to 50% of original
     
     # Value channel (brightness) at maximum
     value = np.ones_like(magnitude_map)
@@ -378,10 +380,16 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
             import cv2
             original_image = cv2.imread(image_path)
             original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+            
+            # Convert to grayscale while keeping 3 channels for blending
+            gray_image = cv2.cvtColor(original_image, cv2.COLOR_RGB2GRAY)
+            gray_image = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2RGB)
+            
+            original_image = gray_image  # Use grayscale version
             original_image = cv2.resize(original_image, (W, H))
             
             # Blend original image with blur field
-            alpha = 0.7  # Transparency of the blur field
+            alpha = 0.5  # Consistent alpha value of 0.5
             rgb_image = alpha * rgb_image + (1 - alpha) * original_image / 255.0
             rgb_image = np.clip(rgb_image, 0, 1)
             
@@ -517,8 +525,8 @@ def visualize_multiple_blur_fields(tensor_list, image_path_list=None, output_pat
     gs = plt.GridSpec(2, 3, width_ratios=[1, 1, 1], height_ratios=[1, 1], 
                      top=0.85)  # Reduced top to leave space for text
     
-    # Create the color wheel for the legend
-    wheel = create_color_wheel(size=300)
+    # Create the color wheel for the legend with reduced saturation
+    wheel = create_color_wheel(size=300, saturation=0.5)  # Match alpha value of 0.5
     
     # Add the color wheel legend in the first position
     ax_legend = fig.add_subplot(gs[0, 0])
@@ -595,6 +603,8 @@ def visualize_multiple_blur_fields(tensor_list, image_path_list=None, output_pat
         # Create HSV representation
         hue = (orientation + np.pi) / (2 * np.pi)
         saturation = np.clip(magnitude / magnitude.max() if magnitude.max() > 0 else magnitude, 0, 1)
+        # Reduce saturation to make colors less intense - match alpha value
+        saturation = 0.5 * saturation  # Reduce saturation to 50% of original
         value = np.ones_like(magnitude)
         
         # Stack HSV channels
@@ -609,10 +619,13 @@ def visualize_multiple_blur_fields(tensor_list, image_path_list=None, output_pat
                 original_image = cv2.imread(image_path)
                 original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
                 original_image = cv2.resize(original_image, (bx.shape[1], bx.shape[0]))
+
+                gray_image = cv2.cvtColor(original_image, cv2.COLOR_RGB2GRAY)
+                gray_image = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2RGB)
                 
                 # Blend original image with blur field
-                alpha = 0.7  # Transparency of the blur field
-                rgb_image = alpha * rgb_image + (1 - alpha) * original_image / 255.0
+                alpha = 0.5  # Consistent alpha value of 0.5
+                rgb_image = alpha * rgb_image + (1 - alpha) * gray_image / 255.0
                 rgb_image = np.clip(rgb_image, 0, 1)
             except Exception as e:
                 print(f"Error loading/blending image {image_path}: {e}")
