@@ -30,6 +30,9 @@ from data_loader import BlurMapDataset
 # --- Import Model Creation Utility ---
 from model_utils import create_dpt_blur_model
 
+# --- Import Custom Loss Function ---
+from losses import BlurVectorLoss, create_blur_vector_loss
+
 # --- Define collate_fn at the top level ---
 def collate_fn_skip_none(batch):
     batch = list(filter(lambda x: x is not None, batch))
@@ -49,6 +52,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         # --- Training Phase ---
         model.train()
         train_loss = 0.0
+        train_dir_loss = 0.0
+        train_mag_loss = 0.0
         pbar_train = tqdm(train_loader, desc=f"Epoch {current_epoch} Training")
         for batch_idx, batch in enumerate(pbar_train):
             if batch is None: # Skip if dataset loader returned None
@@ -65,7 +70,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             else:
                  outputs_resized = outputs
 
-            loss = criterion(outputs_resized.contiguous(), targets.contiguous())
+            # Use the new loss function which returns (total_loss, components_dict)
+            loss, loss_components = criterion(outputs_resized.contiguous(), targets.contiguous())
+            
             if torch.isnan(loss):
                  print(f"Warning: NaN loss encountered at Epoch {current_epoch}, Batch {batch_idx}. Skipping batch.")
                  optimizer.zero_grad() # Clear potentially bad gradients
@@ -77,7 +84,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             optimizer.step()
 
             train_loss += loss.item() * inputs.size(0)
-            pbar_train.set_postfix({'loss': f'{loss.item():.4f}'})
+            train_dir_loss += loss_components['direction_loss'] * inputs.size(0)
+            train_mag_loss += loss_components['magnitude_loss'] * inputs.size(0)
+            
+            # Update progress bar with loss components
+            pbar_train.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'dir': f'{loss_components["direction_loss"]:.4f}',
+                'mag': f'{loss_components["magnitude_loss"]:.4f}'
+            })
 
         # Adjust for potentially skipped batches if dataset size is used for averaging
         num_train_samples = len(train_loader.sampler) if isinstance(train_loader.sampler, torch.utils.data.Sampler) else len(train_loader.dataset)
@@ -86,14 +101,21 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         actual_processed_train = sum(b[0].size(0) for b in train_loader if b is not None) # Example count
         if actual_processed_train == 0: 
              avg_train_loss = 0
+             avg_train_dir_loss = 0
+             avg_train_mag_loss = 0
              print("Warning: No training samples processed in epoch.")
         else: 
              avg_train_loss = train_loss / actual_processed_train
-        print(f"Epoch {current_epoch} Average Training Loss: {avg_train_loss:.6f}")
+             avg_train_dir_loss = train_dir_loss / actual_processed_train
+             avg_train_mag_loss = train_mag_loss / actual_processed_train
+             
+        print(f"Epoch {current_epoch} Average Training Loss: {avg_train_loss:.6f} (Dir: {avg_train_dir_loss:.6f}, Mag: {avg_train_mag_loss:.6f})")
 
         # --- Validation Phase ---
         model.eval()
         val_loss = 0.0
+        val_dir_loss = 0.0
+        val_mag_loss = 0.0
         pbar_val = tqdm(val_loader, desc=f"Epoch {current_epoch} Validation")
         actual_processed_val = 0
         with torch.no_grad():
@@ -109,20 +131,35 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                 else:
                      outputs_resized = outputs
 
-                loss = criterion(outputs_resized, targets)
+                # Use the new loss function
+                loss, loss_components = criterion(outputs_resized, targets)
+                
                 if not torch.isnan(loss):
                     val_loss += loss.item() * inputs.size(0)
+                    val_dir_loss += loss_components['direction_loss'] * inputs.size(0)
+                    val_mag_loss += loss_components['magnitude_loss'] * inputs.size(0)
                     actual_processed_val += inputs.size(0)
-                    pbar_val.set_postfix({'loss': f'{loss.item():.4f}'})
+                    
+                    # Update progress bar with loss components 
+                    pbar_val.set_postfix({
+                        'loss': f'{loss.item():.4f}',
+                        'dir': f'{loss_components["direction_loss"]:.4f}',
+                        'mag': f'{loss_components["magnitude_loss"]:.4f}'
+                    })
                 else:
                     print(f"Warning: NaN validation loss encountered at Epoch {current_epoch}, Batch {batch_idx}. Skipping batch.")
 
         if actual_processed_val == 0:
              avg_val_loss = float('inf') # Or handle as error
+             avg_val_dir_loss = 0
+             avg_val_mag_loss = 0
              print("Warning: No validation samples processed in epoch.")
         else:
              avg_val_loss = val_loss / actual_processed_val
-        print(f"Epoch {current_epoch} Average Validation Loss: {avg_val_loss:.6f}")
+             avg_val_dir_loss = val_dir_loss / actual_processed_val
+             avg_val_mag_loss = val_mag_loss / actual_processed_val
+             
+        print(f"Epoch {current_epoch} Average Validation Loss: {avg_val_loss:.6f} (Dir: {avg_val_dir_loss:.6f}, Mag: {avg_val_mag_loss:.6f})")
 
         # Update learning rate scheduler
         current_lr = optimizer.param_groups[0]['lr']
@@ -147,6 +184,8 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             'head_state_dict': model.scratch.output_conv.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'best_val_loss': best_val_loss,
+            'direction_loss': avg_val_dir_loss,
+            'magnitude_loss': avg_val_mag_loss,
         }
         if scheduler:
             checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
@@ -180,8 +219,11 @@ if __name__ == "__main__":
                         help='Base directory of the restructured dataset (e.g., data/dataset_DPT_blur/), \
                               which should contain train/blur, train/condition, val/blur, val/condition subdirectories.')
     # Model Args
-    parser.add_argument('--weights', type=str, default='weights/dpt_large-ade20k-b12dca68.pt', help='Path to pre-trained DPT segmentation weights (.pt file) for backbone initialization.')
-    parser.add_argument('--model_type', type=str, default='dpt_large', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
+    parser.add_argument('--weights', type=str, default='weights/dpt_hybrid-ade20k-53898607.pt', help='Path to pre-trained DPT segmentation weights (.pt file) for backbone initialization.')
+    parser.add_argument('--model_type', type=str, default='dpt_hybrid', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
+    parser.add_argument('--blur_head_type', type=str, default='original_blur_head', 
+                        choices=['original_blur_head', 'lightweight_blur_head', 'medium_blur_head'], 
+                        help='Type of blur head architecture to use.')
     parser.add_argument('--img_size', type=int, default=384, help='Image size to resize to for DPT input.')
     parser.add_argument('--output_channels', type=int, default=3, help='Number of output channels (must be 3 for bx, by, magnitude).')
     # Training Args
@@ -189,6 +231,14 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for training.')
     parser.add_argument('--lr', type=float, default=1e-4, help='Initial learning rate.')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for DataLoader.')
+    # Loss Function Args
+    parser.add_argument('--lambda_dir', type=float, default=1.0, help='Weight for the directional loss component.')
+    parser.add_argument('--lambda_mag', type=float, default=1.0, help='Weight for the magnitude loss component.')
+    parser.add_argument('--use_magnitude_weighting', action='store_true', 
+                       help='If set, weight directional loss by magnitude (more emphasis on high-blur regions).')
+    parser.add_argument('--magnitude_only', action='store_false', dest='use_direction_loss',
+                       help='If set, only train on magnitude loss, ignoring directional components.')
+    parser.set_defaults(use_direction_loss=False)  # Default: magnitude-only training
     # Checkpoint Args
     parser.add_argument('--checkpoint_dir', type=str, default='./dpt_blur_checkpoints', help='Directory to save model checkpoints.')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint file to resume training from (.pth).')
@@ -254,13 +304,25 @@ if __name__ == "__main__":
     model = create_dpt_blur_model(
         output_channels=args.output_channels,
         model_type=args.model_type,
-        pretrained_weights_path=args.weights, # Pass backbone weights path
-        freeze_backbone=True # Explicitly set freeze_backbone, can be an arg if needed
+        blur_head_type=args.blur_head_type,
+        pretrained_weights_path=args.weights,
+        freeze_backbone=True
     )
     model.to(device)
 
     # Loss and Optimizer
-    criterion = nn.MSELoss()
+    magnitude_only_mode = not args.use_direction_loss
+    training_mode = "Magnitude-Only Mode" if magnitude_only_mode else "Full Blur Vector Mode"
+    print(f"Training in {training_mode}")
+    print(f"Using BlurVectorLoss with lambda_dir={args.lambda_dir}, lambda_mag={args.lambda_mag}, "
+          f"use_magnitude_weighting={args.use_magnitude_weighting}, "
+          f"magnitude_only={magnitude_only_mode}")
+    criterion = BlurVectorLoss(
+        lambda_dir=args.lambda_dir,
+        lambda_mag=args.lambda_mag,
+        use_magnitude_weighting=args.use_magnitude_weighting,
+        magnitude_only=magnitude_only_mode
+    )
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.2, patience=5)
 
@@ -302,7 +364,13 @@ if __name__ == "__main__":
             try:
                 start_epoch = checkpoint['epoch'] # Checkpoint saved epoch *completed*
                 best_val_loss = checkpoint['best_val_loss']
+                
+                # Print direction and magnitude loss components if available
+                dir_loss = checkpoint.get('direction_loss', 'N/A')
+                mag_loss = checkpoint.get('magnitude_loss', 'N/A')
                 print(f"Resuming training from Epoch {start_epoch + 1}. Best validation loss so far: {best_val_loss:.6f}")
+                if dir_loss != 'N/A' and mag_loss != 'N/A':
+                    print(f"Previous loss components - Dir: {dir_loss:.6f}, Mag: {mag_loss:.6f}")
             except KeyError:
                  print("Warning: Checkpoint missing 'epoch' or 'best_val_loss'. Starting from epoch 0.")
                  start_epoch = 0 # Reset if keys are missing
