@@ -54,21 +54,23 @@ def process_blur_data(blur_data_np, data_label="Data"):
     cos_comp = blur_data_np[0, :, :]
     sin_comp = blur_data_np[1, :, :]
     mag_map = blur_data_np[2, :, :]
+    H, W = cos_comp.shape # Get dimensions from the data itself
     
     orientation_for_hsv = np.arctan2(sin_comp, cos_comp) # For HSV plot
     bx_for_quiver = mag_map * cos_comp # For quiver plot
     by_for_quiver = mag_map * sin_comp # For quiver plot
 
     print(f"\n--- {data_label} --- ")
+    print(f"  Shape: ({H}, {W})") # Print shape
     print(f"  Cos Comp (Ch0) - Min: {cos_comp.min():.4f}, Max: {cos_comp.max():.4f}, Mean: {cos_comp.mean():.4f}")
     print(f"  Sin Comp (Ch1) - Min: {sin_comp.min():.4f}, Max: {sin_comp.max():.4f}, Mean: {sin_comp.mean():.4f}")
     print(f"  Magnitude (Ch2) - Min: {mag_map.min():.4f}, Max: {mag_map.max():.4f}, Mean: {mag_map.mean():.4f}")
     print(f"  bx Quiver (Mag*Cos) - Min: {bx_for_quiver.min():.4f}, Max: {bx_for_quiver.max():.4f}, Mean: {bx_for_quiver.mean():.4f}")
     print(f"  by Quiver (Mag*Sin) - Min: {by_for_quiver.min():.4f}, Max: {by_for_quiver.max():.4f}, Mean: {by_for_quiver.mean():.4f}")
-    return cos_comp, sin_comp, mag_map, orientation_for_hsv, bx_for_quiver, by_for_quiver
+    return cos_comp, sin_comp, mag_map, orientation_for_hsv, bx_for_quiver, by_for_quiver, H, W # Return H, W
 
 def plot_visualization_row(axes_row, cos_comp, sin_comp, mag_map, orientation_hsv, bx_quiver, by_quiver, 
-                           original_image_display, quiver_step, H, W, row_title_prefix=""):
+                           original_image_display, quiver_step, data_H, data_W, row_title_prefix=""):
     """Plots one row (3 subplots) for either GT or Prediction."""
     
     # Plot 1: Colorwheel (Orientation-Hue, Magnitude-Saturation)
@@ -97,26 +99,26 @@ def plot_visualization_row(axes_row, cos_comp, sin_comp, mag_map, orientation_hs
     plt.gcf().colorbar(im_mag, ax=axes_row[1], fraction=0.046, pad=0.04)
 
     # Plot 3: Vector Field (Quiver)
-    x_coords, y_coords = np.meshgrid(np.arange(0, W), np.arange(0, H))
+    x_coords, y_coords = np.meshgrid(np.arange(0, data_W), np.arange(0, data_H))
     step = max(1, quiver_step)
     X_sub, Y_sub = x_coords[::step, ::step], y_coords[::step, ::step]
     bx_sub, by_sub = bx_quiver[::step, ::step], by_quiver[::step, ::step]
     mag_sub_for_color = mag_map[::step, ::step]
 
     if original_image_display is not None:
-        if original_image_display.shape[0] != H or original_image_display.shape[1] != W:
-            original_image_resized = cv2.resize(original_image_display, (W, H), interpolation=cv2.INTER_AREA)
+        if original_image_display.shape[0] != data_H or original_image_display.shape[1] != data_W:
+            original_image_resized = cv2.resize(original_image_display, (data_W, data_H), interpolation=cv2.INTER_AREA)
             axes_row[2].imshow(original_image_resized)
         else:
             axes_row[2].imshow(original_image_display)
     else:
-        axes_row[2].imshow(np.ones((H, W)) * 0.5, cmap='gray', vmin=0, vmax=1)
+        axes_row[2].imshow(np.ones((data_H, data_W)) * 0.5, cmap='gray', vmin=0, vmax=1)
     
     quiv = axes_row[2].quiver(X_sub, Y_sub, bx_sub, -by_sub, mag_sub_for_color,
                               cmap='viridis', scale=None, scale_units='xy', 
                               angles='xy', width=0.003, pivot='middle')
     axes_row[2].set_title(f'{row_title_prefix} Vector Field (Step={step})')
-    axes_row[2].set_aspect('equal', adjustable='box'); axes_row[2].set_xlim(0, W); axes_row[2].set_ylim(H, 0)
+    axes_row[2].set_aspect('equal', adjustable='box'); axes_row[2].set_xlim(0, data_W); axes_row[2].set_ylim(data_H, 0)
     axes_row[2].set_xticks([]); axes_row[2].set_yticks([])
     plt.gcf().colorbar(quiv, ax=axes_row[2], fraction=0.046, pad=0.04, label='Vector Magnitude')
 
@@ -130,7 +132,9 @@ def visualize_blur_map(predicted_tensor_path, image_path_cli=None, quiver_step=1
     loaded_pred_image_path = None
     pred_blur_map_tensor = None
     try:
-        loaded_data = torch.load(predicted_tensor_path, map_location=torch.device('cpu'))
+        # Explicitly set weights_only=False as we are loading a dictionary, not just model weights.
+        # This is important for PyTorch 2.6+ where the default changed.
+        loaded_data = torch.load(predicted_tensor_path, map_location=torch.device('cpu'), weights_only=False)
         if isinstance(loaded_data, dict):
             pred_blur_map_tensor = loaded_data['blur_map_tensor']
             loaded_pred_image_path = loaded_data['original_image_path']
@@ -142,9 +146,8 @@ def visualize_blur_map(predicted_tensor_path, image_path_cli=None, quiver_step=1
     except Exception as e:
         print(f"Error loading PRED data from {predicted_tensor_path}: {e}"); return
 
-    cos_pred, sin_pred, mag_pred, orientation_hsv_pred, bx_quiver_pred, by_quiver_pred = \
+    cos_pred, sin_pred, mag_pred, orientation_hsv_pred, bx_quiver_pred, by_quiver_pred, H_pred, W_pred = \
         process_blur_data(pred_blur_map_np, "Prediction")
-    H_pred, W_pred = mag_pred.shape
 
     # --- Determine and Load Original Image for Display ---
     final_display_image_path = image_path_cli if image_path_cli else loaded_pred_image_path
@@ -177,11 +180,11 @@ def visualize_blur_map(predicted_tensor_path, image_path_cli=None, quiver_step=1
 
     # --- Plot Top Row: Ground Truth (if available) ---
     if gt_map_np is not None:
-        cos_gt, sin_gt, mag_gt, orientation_hsv_gt, bx_quiver_gt, by_quiver_gt = \
+        cos_gt, sin_gt, mag_gt, orientation_hsv_gt, bx_quiver_gt, by_quiver_gt, H_gt, W_gt = \
             process_blur_data(gt_map_np, "Ground Truth")
         plot_visualization_row(axes[0,:], cos_gt, sin_gt, mag_gt, orientation_hsv_gt, 
                                bx_quiver_gt, by_quiver_gt, original_image_for_display, 
-                               quiver_step, H_pred, W_pred, "GT") # Assume GT matches pred dimensions for now
+                               quiver_step, H_gt, W_gt, "GT")
     else:
         for i in range(3): axes[0,i].text(0.5, 0.5, 'Ground Truth Not Available', ha='center', va='center'); axes[0,i].set_xticks([]); axes[0,i].set_yticks([])
         axes[0,0].set_title("GT HSV (Not Available)")
