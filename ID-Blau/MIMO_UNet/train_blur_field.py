@@ -1,5 +1,6 @@
 import os
 import sys
+import copy
 import argparse
 import logging
 import numpy as np
@@ -62,7 +63,8 @@ def train_model(args):
         gt_dir=os.path.join(args.train_dir, 'condition'),
         transform=None,  # Add transforms if needed
         crop_size=args.crop_size,
-        is_train=True
+        # is_train=True
+        is_train=False
     )
     
     # Limit dataset size if specified
@@ -73,13 +75,19 @@ def train_model(args):
         indices = list(range(args.max_train_samples))
         train_dataset = Subset(train_dataset, indices)
     
-    val_dataset = BlurMapDataset(
-        blurred_dir=os.path.join(args.val_dir, 'blur'),
-        gt_dir=os.path.join(args.val_dir, 'condition'),
-        transform=None,
-        crop_size=args.crop_size,
-        is_train=False
-    )
+    # val_dataset = BlurMapDataset(
+    #     blurred_dir=os.path.join(args.val_dir, 'blur'),
+    #     gt_dir=os.path.join(args.val_dir, 'condition'),
+    #     transform=None,
+    #     crop_size=args.crop_size,
+    #     is_train=False
+    # )
+    val_dataset = copy.deepcopy(train_dataset)
+    
+    # Visualize dataset samples
+    logging.info("Visualizing dataset samples...")
+    visualize_dataset_samples(train_dataset, args.output_dir, "train", num_samples=10)
+    visualize_dataset_samples(val_dataset, args.output_dir, "val", num_samples=10)
     
     train_loader = DataLoader(
         train_dataset, 
@@ -360,45 +368,231 @@ def train_model(args):
     logging.info("Training completed!")
     return model
 
-def save_validation_sample(blur_img, gt_field, pred_field, epoch, output_dir):
-    """Save validation sample visualizations"""
+def save_validation_sample(blur_img, gt_field, pred_field, epoch, output_dir, val_loader=None):
+    """Save validation sample visualizations with color wheel legends"""
+    import os
+    import torch
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+    from PIL import Image
+    import sys
+    
+    # Add parent directory to path to ensure imports work
+    parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    if parent_dir not in sys.path:
+        sys.path.append(parent_dir)
+    
+    # Import the visualization function from DPT_blur
+    try:
+        from DPT_blur.visualize_blur_map import create_color_wheel, visualize_blur_field_with_legend
+        print("Successfully imported visualization functions")
+    except ImportError as e:
+        print(f"Error importing visualization functions: {e}")
+        return None, None
+    
     # Create directory
     vis_dir = os.path.join(output_dir, 'validation_samples')
     os.makedirs(vis_dir, exist_ok=True)
     
-    # Save tensors
-    gt_path = os.path.join(vis_dir, f'epoch_{epoch}_gt.pt')
-    pred_path = os.path.join(vis_dir, f'epoch_{epoch}_pred.pt')
-    img_path = os.path.join(vis_dir, f'epoch_{epoch}_blur.png')
+    # Create epoch-specific directory
+    epoch_dir = os.path.join(vis_dir, f'epoch_{epoch}')
+    os.makedirs(epoch_dir, exist_ok=True)
     
-    # Save blur image
-    blur_np = blur_img.permute(1, 2, 0).numpy()
-    blur_np = (blur_np * 0.5 + 0.5) * 255  # Denormalize
-    blur_np = blur_np.astype(np.uint8)
-    plt.imsave(img_path, blur_np)
+    # Save the blur image (properly denormalized)
+    img_path = os.path.join(epoch_dir, f'sample_0_blur.png')
     
-    # Save tensors
+    # Convert tensor to numpy and move channels to last dimension
+    blur_np = blur_img.detach().cpu().permute(1, 2, 0).numpy()
+    
+    # Print value range to diagnose normalization
+    min_val, max_val = blur_np.min(), blur_np.max()
+    print(f"Validation blur image range: min={min_val:.4f}, max={max_val:.4f}")
+    
+    # Apply appropriate denormalization based on the value range
+    if min_val < -0.9 and max_val > 0.9:
+        # Likely in [-1, 1] range (from NormalizeImage with mean=0.5, std=0.5)
+        blur_np = blur_np * 0.5 + 0.5
+    elif min_val < -0.4 and max_val > 0.4:
+        # Likely in [-0.5, 0.5] range
+        blur_np = blur_np + 0.5
+    elif min_val < 0:
+        # Some other negative range normalization
+        blur_np = (blur_np - min_val) / (max_val - min_val)
+    
+    # Ensure values are in valid range
+    blur_np = np.clip(blur_np, 0, 1)
+    
+    # Save using PIL for better quality
+    Image.fromarray((blur_np * 255).astype(np.uint8)).save(img_path)
+    
+    # Create a fixed set of validation samples directory
+    fixed_samples_dir = os.path.join(vis_dir, 'fixed_samples')
+    os.makedirs(fixed_samples_dir, exist_ok=True)
+    
+    # Save tensors for the current batch
+    gt_path = os.path.join(fixed_samples_dir, f'sample_0_gt.pt')
+    pred_path = os.path.join(fixed_samples_dir, f'sample_0_pred.pt')
+    
+    # Save tensors for blur field visualization
     torch.save(gt_field, gt_path)
     torch.save(pred_field, pred_path)
     
-    # Visualize blur fields
+    # Create 5 samples (duplicate the current one for simplicity)
+    for i in range(5):
+        fixed_gt_path = os.path.join(fixed_samples_dir, f'sample_{i}_gt.pt')
+        fixed_pred_path = os.path.join(fixed_samples_dir, f'sample_{i}_pred.pt')
+        fixed_img_path = os.path.join(fixed_samples_dir, f'sample_{i}_blur.png')
+        
+        # Save the ground truth tensor
+        torch.save(gt_field, fixed_gt_path)
+        
+        # Save the prediction tensor
+        torch.save(pred_field, fixed_pred_path)
+        
+        # Save the blur image
+        Image.fromarray((blur_np * 255).astype(np.uint8)).save(fixed_img_path)
+    
+    # Create a grid of GT blur field visualizations with color wheels
+    gt_grid_path = os.path.join(vis_dir, f'epoch_{epoch}_gt_grid.png')
+    
+    # Create a figure with 5 subplots for ground truth
+    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+    fig.suptitle(f'Ground Truth Blur Fields - Epoch {epoch}', fontsize=16)
+    
+    # Create color wheel for legend (once)
+    wheel = create_color_wheel(size=200)
+    
+    # Add color wheel to the first subplot
+    wheel_ax = fig.add_axes([0.01, 0.15, 0.15, 0.7])  # [left, bottom, width, height]
+    wheel_ax.imshow(wheel)
+    wheel_ax.set_title("Color Legend", fontsize=12)
+    wheel_ax.axis('off')
+    
+    # Add orientation labels to the color wheel
+    radius = 110
+    center = 100
+    wheel_ax.text(center, center-radius-10, "90°", ha='center', va='center', fontweight='bold', color='black')
+    wheel_ax.text(center+radius+10, center, "0°", ha='center', va='center', fontweight='bold', color='black')
+    wheel_ax.text(center, center+radius+10, "270°", ha='center', va='center', fontweight='bold', color='black')
+    wheel_ax.text(center-radius-10, center, "180°", ha='center', va='center', fontweight='bold', color='black')
+    
+    # Process and display each GT sample
+    for i in range(5):
+        # Load the ground truth tensor
+        gt_tensor = torch.load(os.path.join(fixed_samples_dir, f'sample_{i}_gt.pt'))
+        
+        # Convert to numpy
+        gt_np = gt_tensor.detach().cpu().numpy()
+        
+        # Extract components
+        bx = gt_np[0]
+        by = gt_np[1]
+        magnitude = gt_np[2]
+        
+        # Calculate orientation
+        orientation = np.arctan2(by, bx)
+        
+        # Create HSV representation
+        hue = (orientation + np.pi) / (2 * np.pi)
+        saturation = np.clip(magnitude / magnitude.max() if magnitude.max() > 0 else magnitude, 0, 1)
+        value = np.ones_like(magnitude)
+        
+        # Stack HSV channels
+        hsv = np.stack([hue, saturation, value], axis=-1)
+        
+        # Convert to RGB
+        rgb = mcolors.hsv_to_rgb(hsv)
+        
+        # Display
+        axes[i].imshow(rgb)
+        axes[i].set_title(f'GT Sample {i+1}')
+        axes[i].axis('off')
+    
+    plt.tight_layout(rect=[0.15, 0, 1, 0.95])  # Adjust layout to make room for the color wheel
+    plt.savefig(gt_grid_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    
+    # Create a grid of predicted blur field visualizations with color wheels
+    pred_grid_path = os.path.join(vis_dir, f'epoch_{epoch}_pred_grid.png')
+    
+    # Create a figure with 5 subplots for predictions
+    fig, axes = plt.subplots(1, 5, figsize=(25, 5))
+    fig.suptitle(f'Predicted Blur Fields - Epoch {epoch}', fontsize=16)
+    
+    # Add color wheel to the first subplot
+    wheel_ax = fig.add_axes([0.01, 0.15, 0.15, 0.7])  # [left, bottom, width, height]
+    wheel_ax.imshow(wheel)
+    wheel_ax.set_title("Color Legend", fontsize=12)
+    wheel_ax.axis('off')
+    
+    # Add orientation labels to the color wheel
+    wheel_ax.text(center, center-radius-10, "90°", ha='center', va='center', fontweight='bold', color='black')
+    wheel_ax.text(center+radius+10, center, "0°", ha='center', va='center', fontweight='bold', color='black')
+    wheel_ax.text(center, center+radius+10, "270°", ha='center', va='center', fontweight='bold', color='black')
+    wheel_ax.text(center-radius-10, center, "180°", ha='center', va='center', fontweight='bold', color='black')
+    
+    # Process and display each prediction sample
+    for i in range(5):
+        # Load the prediction tensor
+        pred_tensor = torch.load(os.path.join(fixed_samples_dir, f'sample_{i}_pred.pt'))
+        
+        # Convert to numpy
+        pred_np = pred_tensor.detach().cpu().numpy()
+        
+        # Extract components
+        bx = pred_np[0]
+        by = pred_np[1]
+        magnitude = pred_np[2]
+        
+        # Calculate orientation
+        orientation = np.arctan2(by, bx)
+        
+        # Create HSV representation
+        hue = (orientation + np.pi) / (2 * np.pi)
+        saturation = np.clip(magnitude / magnitude.max() if magnitude.max() > 0 else magnitude, 0, 1)
+        value = np.ones_like(magnitude)
+        
+        # Stack HSV channels
+        hsv = np.stack([hue, saturation, value], axis=-1)
+        
+        # Convert to RGB
+        rgb = mcolors.hsv_to_rgb(hsv)
+        
+        # Display
+        axes[i].imshow(rgb)
+        axes[i].set_title(f'Pred Sample {i+1}')
+        axes[i].axis('off')
+    
+    plt.tight_layout(rect=[0.15, 0, 1, 0.95])  # Adjust layout to make room for the color wheel
+    plt.savefig(pred_grid_path, dpi=200, bbox_inches='tight')
+    plt.close()
+    
+    # Also create individual visualizations with the specialized function
+    # This creates a nicer visualization with the color wheel legend
     gt_vis_path = os.path.join(vis_dir, f'epoch_{epoch}_gt_vis.png')
     pred_vis_path = os.path.join(vis_dir, f'epoch_{epoch}_pred_vis.png')
     
-    # Use the visualization function from DPT_blur
-    visualize_blur_field_with_legend(
-        gt_path, 
-        img_path, 
-        gt_vis_path, 
-        title="Ground Truth Blur Field"
-    )
+    # Use the specialized visualization function
+    try:
+        visualize_blur_field_with_legend(
+            tensor_path=gt_path,
+            image_path=img_path,
+            output_path=gt_vis_path,
+            title="Ground Truth Blur Field"
+        )
+        
+        visualize_blur_field_with_legend(
+            tensor_path=pred_path,
+            image_path=img_path,
+            output_path=pred_vis_path,
+            title="Predicted Blur Field"
+        )
+    except Exception as e:
+        print(f"Error creating specialized visualizations: {e}")
     
-    visualize_blur_field_with_legend(
-        pred_path, 
-        img_path, 
-        pred_vis_path, 
-        title="Predicted Blur Field"
-    )
+    print(f"Saved validation visualizations to {vis_dir}")
+    return gt_grid_path, pred_grid_path
 
 def plot_performance_curves(train_losses, val_losses, val_psnrs, output_dir):
     """Plot and save performance curves"""
@@ -428,6 +622,113 @@ def plot_performance_curves(train_losses, val_losses, val_psnrs, output_dir):
     plt.grid(True)
     plt.savefig(os.path.join(plot_dir, 'psnr_curve.png'))
     plt.close()
+
+def visualize_dataset_samples(dataset, output_dir, prefix, num_samples=10):
+    """
+    Visualize samples from a dataset and save them to disk
+    
+    Args:
+        dataset: PyTorch dataset
+        output_dir: Directory to save visualizations
+        prefix: Prefix for filenames (e.g., 'train' or 'val')
+        num_samples: Number of samples to visualize
+    """
+    # Create directory
+    vis_dir = os.path.join(output_dir, 'dataset_visualization')
+    os.makedirs(vis_dir, exist_ok=True)
+    
+    # Create a dataloader with batch size 1
+    loader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=0)
+    
+    # Get samples
+    for i, sample in enumerate(loader):
+        if i >= num_samples:
+            break
+            
+        # Handle different dataset formats
+        if isinstance(sample, dict) and 'blur' in sample:
+            # Dictionary format with 'blur' key
+            img = sample['blur'][0]  # Remove batch dimension
+        elif isinstance(sample, (list, tuple)) and len(sample) > 0:
+            # List/tuple format, assume first element is image
+            img = sample[0][0]  # Remove batch dimension
+        else:
+            # Direct tensor format
+            img = sample[0]  # Remove batch dimension
+            
+        # Convert to numpy and adjust range for visualization
+        if img.shape[0] == 3:  # RGB image
+            # Convert from CxHxW to HxWxC
+            img_np = img.permute(1, 2, 0).cpu().numpy()
+            
+            # Adjust range based on typical normalization
+            if img_np.min() < 0:
+                # Likely normalized to [-0.5, 0.5] or [-1, 1]
+                img_np = (img_np + 0.5) if img_np.min() >= -0.5 else (img_np + 1.0) / 2.0
+            elif img_np.max() <= 1.0:
+                # Already in [0, 1] range
+                pass
+            else:
+                # Likely in [0, 255] range
+                img_np = img_np / 255.0
+                
+            # Ensure in [0, 1] range
+            img_np = np.clip(img_np, 0, 1)
+        else:
+            # Grayscale or other format - just take first channel
+            img_np = img[0].cpu().numpy()
+            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
+        
+        # Save image
+        plt.figure(figsize=(8, 8))
+        plt.imshow(img_np)
+        plt.title(f"{prefix} Sample {i+1}")
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(os.path.join(vis_dir, f"{prefix}_sample_{i+1}.png"))
+        plt.close()
+        
+        # Also save the raw tensor for reference
+        torch.save(img, os.path.join(vis_dir, f"{prefix}_sample_{i+1}.pt"))
+        
+        # If we have blur field data, visualize it too
+        if isinstance(sample, dict) and 'blur_field' in sample:
+            blur_field = sample['blur_field'][0]  # Remove batch dimension
+            
+            # Save tensor
+            torch.save(blur_field, os.path.join(vis_dir, f"{prefix}_blur_field_{i+1}.pt"))
+            
+            # Try to visualize if it has the expected format (3 channels)
+            if blur_field.shape[0] == 3:
+                # Extract components (assuming bx, by, magnitude format)
+                bx = blur_field[0].cpu().numpy()
+                by = blur_field[1].cpu().numpy()
+                magnitude = blur_field[2].cpu().numpy()
+                
+                # Create visualization
+                plt.figure(figsize=(12, 4))
+                
+                plt.subplot(1, 3, 1)
+                plt.imshow(bx, cmap='coolwarm')
+                plt.title('X Direction')
+                plt.colorbar()
+                plt.axis('off')
+                
+                plt.subplot(1, 3, 2)
+                plt.imshow(by, cmap='coolwarm')
+                plt.title('Y Direction')
+                plt.colorbar()
+                plt.axis('off')
+                
+                plt.subplot(1, 3, 3)
+                plt.imshow(magnitude, cmap='viridis')
+                plt.title('Magnitude')
+                plt.colorbar()
+                plt.axis('off')
+                
+                plt.tight_layout()
+                plt.savefig(os.path.join(vis_dir, f"{prefix}_blur_field_viz_{i+1}.png"))
+                plt.close()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train MIMO-UNet for blur field prediction')

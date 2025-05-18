@@ -410,3 +410,414 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
         plt.show()
     
     return rgb_image
+
+def visualize_blur_components(blur_data_path, image_path=None, output_path=None):
+    """
+    Visualize blur components (magnitude, x direction, y direction) from ground truth data.
+    
+    Args:
+        blur_data_path: Path to the .npy file containing blur data (3, H, W)
+        image_path: Optional path to the original image
+        output_path: Path to save the visualization
+    """
+    # Load blur data
+    if blur_data_path.endswith('.npy'):
+        blur_data = np.load(blur_data_path)
+    elif blur_data_path.endswith('.pt'):
+        blur_data = torch.load(blur_data_path, map_location=torch.device('cpu'))
+        if isinstance(blur_data, torch.Tensor):
+            blur_data = blur_data.detach().cpu().numpy()
+        else:
+            raise TypeError(f"Expected tensor in .pt file, got {type(blur_data)}")
+    else:
+        raise ValueError(f"Unsupported file format: {blur_data_path}")
+    
+    # Ensure blur data has the right shape
+    if blur_data.shape[0] != 3:
+        raise ValueError(f"Expected blur data with 3 channels, got {blur_data.shape}")
+    
+    # Extract components
+    x_direction = blur_data[0]
+    y_direction = blur_data[1]
+    magnitude = blur_data[2]
+    
+    # Load original image if provided
+    original_image = None
+    if image_path and os.path.exists(image_path):
+        try:
+            original_image = cv2.imread(image_path)
+            original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+            # Resize to match blur data dimensions
+            original_image = cv2.resize(original_image, (x_direction.shape[1], x_direction.shape[0]))
+        except Exception as e:
+            print(f"Error loading image {image_path}: {e}")
+            original_image = None
+    
+    # Create figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    
+    # Plot 1: Magnitude
+    im_mag = axes[0].imshow(magnitude, cmap='viridis')
+    axes[0].set_title('Blur Magnitude')
+    axes[0].set_xticks([])
+    axes[0].set_yticks([])
+    plt.colorbar(im_mag, ax=axes[0], fraction=0.046, pad=0.04)
+    
+    # Plot 2: X Direction
+    im_x = axes[1].imshow(x_direction, cmap='coolwarm', vmin=-1, vmax=1)
+    axes[1].set_title('X Direction Blur')
+    axes[1].set_xticks([])
+    axes[1].set_yticks([])
+    plt.colorbar(im_x, ax=axes[1], fraction=0.046, pad=0.04)
+    
+    # Plot 3: Y Direction
+    im_y = axes[2].imshow(y_direction, cmap='coolwarm', vmin=-1, vmax=1)
+    axes[2].set_title('Y Direction Blur')
+    axes[2].set_xticks([])
+    axes[2].set_yticks([])
+    plt.colorbar(im_y, ax=axes[2], fraction=0.046, pad=0.04)
+    
+    # Add overall title
+    image_name = os.path.basename(blur_data_path)
+    plt.suptitle(f'Blur Components: {image_name}', fontsize=16)
+    
+    plt.tight_layout()
+    
+    # Save or display
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Saved visualization to {output_path}")
+    else:
+        plt.show()
+
+def visualize_multiple_blur_fields(tensor_list, image_path_list=None, output_path=None):
+    """
+    Visualize multiple blur fields with a shared color wheel legend.
+    
+    Args:
+        tensor_list: List of tensors or numpy arrays with shape (3, H, W) for bx, by, magnitude
+        image_path_list: Optional list of paths to original images to blend with blur fields
+        output_path: Path to save the visualization. If None, the figure will be displayed.
+    
+    Returns:
+        Path to saved visualization if output_path is provided, otherwise None
+    """
+    import os
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import cv2
+    import torch
+    import matplotlib.colors as mcolors
+    
+    # Create a figure with 6 subplots (1 for legend, 5 for images)
+    fig = plt.figure(figsize=(20, 10))  # Increased height for more space
+    
+    # Create a grid layout with more space at the top
+    gs = plt.GridSpec(2, 3, width_ratios=[1, 1, 1], height_ratios=[1, 1], 
+                     top=0.85)  # Reduced top to leave space for text
+    
+    # Create the color wheel for the legend
+    wheel = create_color_wheel(size=300)
+    
+    # Add the color wheel legend in the first position
+    ax_legend = fig.add_subplot(gs[0, 0])
+    ax_legend.imshow(wheel)
+    
+    # Add title and explanation text ABOVE the color wheel using figure coordinates
+    fig.text(0.25, 0.90, "Blur Field Color Legend", ha='center', va='center', 
+             fontweight='bold', fontsize=16)
+    
+    # Add orientation labels to the color wheel
+    center = 150  # Center of the wheel (half of size)
+    radius = 160  # Slightly larger than wheel radius for labels
+    ax_legend.text(center, center-radius-10, "90°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
+    ax_legend.text(center+radius+10, center, "0°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
+    ax_legend.text(center, center+radius+10, "270°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
+    ax_legend.text(center-radius-10, center, "180°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
+    
+    # Add diagonal arrow for magnitude and orientation
+    # Arrow pointing from center to top-right (45 degrees)
+    arrow_length = 100
+    dx = arrow_length * np.cos(np.radians(45))
+    dy = -arrow_length * np.sin(np.radians(45))  # Negative because y-axis is inverted in images
+    
+    # Draw the arrow
+    ax_legend.arrow(center, center, dx, dy, 
+                   head_width=10, head_length=15, fc='black', ec='black', 
+                   linewidth=2, length_includes_head=True)
+    
+    # Add "Magnitude" text along the arrow
+    # Position text at 45 degrees, slightly offset from the arrow
+    mag_x = center + 0.5 * dx
+    mag_y = center + 0.5 * dy
+    ax_legend.text(mag_x - 15, mag_y - 15, "Magnitude", ha='center', va='center', 
+                  fontweight='bold', color='black', fontsize=12, rotation=45)
+    
+    # Add "Orientation" text curved around the edge
+    # Position text near the edge at 45 degrees
+    orient_x = center + 0.8 * dx
+    orient_y = center + 0.8 * dy
+    ax_legend.text(orient_x + 50, orient_y - 50, "Orientation", ha='center', va='center', 
+                  fontweight='bold', color='black', fontsize=12, rotation=-45)
+    
+    ax_legend.axis('off')
+    
+    # Define positions for the 5 blur field visualizations
+    positions = [
+        gs[0, 1], gs[0, 2],  # Top row
+        gs[1, 0], gs[1, 1], gs[1, 2]  # Bottom row
+    ]
+    
+    # Process each tensor and create visualizations
+    for i, tensor in enumerate(tensor_list[:5]):  # Limit to 5 images
+        # Get the corresponding image path if available
+        image_path = None
+        if image_path_list and i < len(image_path_list):
+            image_path = image_path_list[i]
+        
+        # Create subplot for this tensor
+        ax = fig.add_subplot(positions[i])
+        
+        # Extract components
+        if isinstance(tensor, torch.Tensor):
+            tensor_np = tensor.detach().cpu().numpy()
+        else:
+            tensor_np = tensor
+            
+        bx = tensor_np[0]
+        by = tensor_np[1]
+        magnitude = tensor_np[2]
+        
+        # Calculate orientation
+        orientation = np.arctan2(by, bx)
+        
+        # Create HSV representation
+        hue = (orientation + np.pi) / (2 * np.pi)
+        saturation = np.clip(magnitude / magnitude.max() if magnitude.max() > 0 else magnitude, 0, 1)
+        value = np.ones_like(magnitude)
+        
+        # Stack HSV channels
+        hsv = np.stack([hue, saturation, value], axis=-1)
+        
+        # Convert HSV to RGB
+        rgb_image = mcolors.hsv_to_rgb(hsv)
+        
+        # If we have an original image, blend it with the blur field
+        if image_path and os.path.exists(image_path):
+            try:
+                original_image = cv2.imread(image_path)
+                original_image = cv2.cvtColor(original_image, cv2.COLOR_BGR2RGB)
+                original_image = cv2.resize(original_image, (bx.shape[1], bx.shape[0]))
+                
+                # Blend original image with blur field
+                alpha = 0.7  # Transparency of the blur field
+                rgb_image = alpha * rgb_image + (1 - alpha) * original_image / 255.0
+                rgb_image = np.clip(rgb_image, 0, 1)
+            except Exception as e:
+                print(f"Error loading/blending image {image_path}: {e}")
+        
+        # Display the blur field
+        ax.imshow(rgb_image)
+        
+        # Set title based on image path or index
+        if image_path:
+            title = os.path.basename(image_path)
+            if len(title) > 20:  # Truncate long filenames
+                title = title[:17] + "..."
+        else:
+            title = f"Blur Field {i+1}"
+            
+        ax.set_title(title, fontsize=12)
+        ax.axis('off')
+    
+    # Adjust layout
+    plt.tight_layout(rect=[0, 0, 1, 0.85])  # Leave space at the top for titles
+    
+    # Save or display the figure
+    if output_path:
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"Visualization saved to {output_path}")
+        return output_path
+    else:
+        plt.show()
+        return None
+
+def visualize_dataset_samples(dataset_path, output_dir="./visualizations", num_samples=5):
+    """
+    Visualize blur field samples from a dataset directory structure.
+    
+    Args:
+        dataset_path: Path to dataset directory containing 'blur' and 'condition' subdirectories
+        output_dir: Directory to save visualizations
+        num_samples: Number of samples to visualize
+    
+    Returns:
+        Path to the multiple visualization file
+    """
+    import os
+    import glob
+    import numpy as np
+    import torch
+    
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Get paths to blur images and condition files
+    blur_dir = os.path.join(dataset_path, 'blur')
+    condition_dir = os.path.join(dataset_path, 'condition')
+    
+    if not os.path.exists(blur_dir):
+        print(f"Error: Blur directory not found at {blur_dir}")
+        return None
+    
+    if not os.path.exists(condition_dir):
+        print(f"Error: Condition directory not found at {condition_dir}")
+        return None
+    
+    # Get all blur images
+    blur_images = sorted(glob.glob(os.path.join(blur_dir, '*.png')))
+    if not blur_images:
+        blur_images = sorted(glob.glob(os.path.join(blur_dir, '*.jpg')))
+    
+    if not blur_images:
+        print(f"No image files found in {blur_dir}")
+        return None
+    
+    # Get all condition files
+    condition_files = sorted(glob.glob(os.path.join(condition_dir, '*.npy')))
+    
+    if not condition_files:
+        print(f"No .npy files found in {condition_dir}")
+        return None
+    
+    print(f"Found {len(blur_images)} blur images and {len(condition_files)} condition files")
+    
+    # Match blur images with condition files
+    image_path_list = []
+    tensor_list = []
+    
+    # Take the first num_samples
+    for i in range(min(num_samples, len(blur_images), len(condition_files))):
+        blur_image = blur_images[i]
+        condition_file = condition_files[i]
+        
+        # Load the condition tensor
+        try:
+            tensor = np.load(condition_file)
+            tensor_list.append(tensor)
+            image_path_list.append(blur_image)
+            
+            # Save a copy of the tensor as .pt for compatibility
+            tensor_path = os.path.join(output_dir, f"sample_{i}_flow.pt")
+            torch.save(torch.from_numpy(tensor), tensor_path)
+            
+            print(f"Loaded sample {i+1}: {os.path.basename(blur_image)} and {os.path.basename(condition_file)}")
+            
+            # Create individual visualization for this sample
+            try:
+                # Generate output path for this individual visualization
+                components_vis_path = os.path.join(output_dir, f"sample_{i}_components.png")
+                
+                # Call the visualization function that shows magnitude, x direction, y direction
+                visualize_blur_components(
+                    condition_file,  # Use the .npy file directly
+                    image_path=blur_image,
+                    output_path=components_vis_path
+                )
+                
+                print(f"Created components visualization for sample {i+1} at {components_vis_path}")
+                
+                # Also create the color wheel visualization
+                color_vis_output_path = os.path.join(output_dir, f"sample_{i}_color_visualization.png")
+                
+                visualize_blur_field_with_legend(
+                    tensor_path=tensor_path,
+                    image_path=blur_image,
+                    output_path=color_vis_output_path,
+                    title=f"Blur Field - {os.path.basename(blur_image)}"
+                )
+                
+                print(f"Created color wheel visualization for sample {i+1} at {color_vis_output_path}")
+                
+            except Exception as e:
+                print(f"Error creating visualizations for sample {i+1}: {e}")
+                
+        except Exception as e:
+            print(f"Error loading condition file {condition_file}: {e}")
+    
+    if not tensor_list:
+        print("No valid samples found")
+        return None
+    
+    # Create multiple visualization
+    try:
+        output_path = os.path.join(output_dir, "multiple_blur_fields.png")
+        visualize_multiple_blur_fields(tensor_list, image_path_list, output_path)
+        print("Multiple visualization created successfully")
+        return output_path
+    except Exception as e:
+        print(f"Error creating multiple visualization: {e}")
+        return None
+
+# Add a command-line interface to make the file directly executable
+if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Visualize blur fields from dataset or individual files")
+    parser.add_argument("--dataset", type=str, help="Path to dataset directory with 'blur' and 'condition' subdirectories")
+    parser.add_argument("--tensor_paths", nargs='+', help="Paths to individual tensor files (.pt or .npy)")
+    parser.add_argument("--image_paths", nargs='+', help="Paths to corresponding images (optional)")
+    parser.add_argument("--output_dir", type=str, default="./visualizations", help="Output directory for visualizations")
+    parser.add_argument("--num_samples", type=int, default=5, help="Number of samples to visualize from dataset")
+    parser.add_argument("--single_tensor", type=str, help="Path to a single tensor file to visualize with detailed components")
+    parser.add_argument("--single_image", type=str, help="Path to corresponding image for single tensor visualization")
+    
+    args = parser.parse_args()
+    
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    if args.dataset:
+        # Visualize samples from dataset
+        visualize_dataset_samples(args.dataset, args.output_dir, args.num_samples)
+    
+    elif args.tensor_paths:
+        # Visualize multiple individual tensors
+        tensor_list = []
+        for tensor_path in args.tensor_paths:
+            if tensor_path.endswith('.npy'):
+                tensor = np.load(tensor_path)
+            elif tensor_path.endswith('.pt'):
+                tensor = torch.load(tensor_path, map_location=torch.device('cpu'))
+                if isinstance(tensor, torch.Tensor):
+                    tensor = tensor.detach().cpu().numpy()
+            else:
+                print(f"Unsupported file format: {tensor_path}")
+                continue
+            tensor_list.append(tensor)
+        
+        # Get corresponding image paths if provided
+        image_path_list = args.image_paths if args.image_paths else None
+        
+        # Create visualization
+        output_path = os.path.join(args.output_dir, "multiple_blur_fields.png")
+        visualize_multiple_blur_fields(tensor_list, image_path_list, output_path)
+    
+    elif args.single_tensor:
+        # Visualize a single tensor with detailed components
+        if args.single_tensor.endswith('.npy') or args.single_tensor.endswith('.pt'):
+            output_path = os.path.join(args.output_dir, "blur_components.png")
+            visualize_blur_components(args.single_tensor, args.single_image, output_path)
+            
+            # Also create color wheel visualization
+            color_output_path = os.path.join(args.output_dir, "blur_field_color.png")
+            visualize_blur_field_with_legend(args.single_tensor, args.single_image, color_output_path)
+        else:
+            print(f"Unsupported file format: {args.single_tensor}")
+    
+    else:
+        parser.print_help()
