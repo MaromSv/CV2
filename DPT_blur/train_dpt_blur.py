@@ -231,8 +231,24 @@ if __name__ == "__main__":
     # Datasets
     print("Setting up datasets...")
     try:
-        train_dataset_full = BlurMapDataset(blurred_dir_train, gt_dir_train, transform=dpt_transform, target_transform=target_transform, crop_size=args.img_size, is_train=True, random_flip=True)
-        val_dataset_full = BlurMapDataset(blurred_dir_val, gt_dir_val, transform=dpt_transform, target_transform=target_transform, crop_size=args.img_size, is_train=False, random_flip=False)
+        train_dataset_full = BlurMapDataset(
+            blurred_dir_train,
+            gt_dir_train,
+            transform=dpt_transform,
+            target_transform=target_transform,
+            crop_size=args.img_size,
+            is_train=True,
+            random_flip=True
+        )
+        val_dataset_full = BlurMapDataset(
+            blurred_dir_val,
+            gt_dir_val,
+            transform=dpt_transform,
+            target_transform=target_transform,
+            crop_size=args.img_size,
+            is_train=False,
+            random_flip=False
+        )
     except FileNotFoundError as e:
         print(f"Error initializing dataset: {e}")
         exit()
