@@ -31,7 +31,7 @@ from data_loader import BlurMapDataset
 from model_utils import create_dpt_blur_model
 
 # --- Import Custom Loss Function ---
-from losses import BlurVectorLoss, create_blur_vector_loss
+from losses import WeightedBlurVectorLoss, create_weighted_blur_vector_loss
 
 # --- Define collate_fn at the top level ---
 def collate_fn_skip_none(batch):
@@ -330,10 +330,10 @@ if __name__ == "__main__":
     magnitude_only_mode = not args.use_direction_loss
     training_mode = "Magnitude-Only Mode" if magnitude_only_mode else "Full Blur Vector Mode"
     print(f"Training in {training_mode}")
-    print(f"Using BlurVectorLoss with lambda_dir={args.lambda_dir}, lambda_mag={args.lambda_mag}, "
+    print(f"Using WeightedBlurVectorLoss with lambda_dir={args.lambda_dir}, lambda_mag={args.lambda_mag}, "
           f"use_magnitude_weighting={args.use_magnitude_weighting}, "
           f"magnitude_only={magnitude_only_mode}")
-    criterion = BlurVectorLoss(
+    criterion = WeightedBlurVectorLoss(
         lambda_dir=args.lambda_dir,
         lambda_mag=args.lambda_mag,
         use_magnitude_weighting=args.use_magnitude_weighting,
