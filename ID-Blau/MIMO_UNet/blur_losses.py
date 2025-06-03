@@ -102,34 +102,22 @@ class MultiScaleBlurFieldLoss(nn.Module):
         # Handle case where outputs is not a list (single output)
         if not isinstance(outputs, list):
             outputs = [outputs]
-            print(f"DEBUG: Single output converted to list, shape: {outputs[0].shape}")
-        else:
-            print(f"DEBUG: Multi-scale outputs received, count: {len(outputs)}")
-            for i, out in enumerate(outputs):
-                if isinstance(out, tuple):
-                    print(f"DEBUG: Scale {i} - tuple output with shapes: {out[0].shape}, {out[1].shape}, {out[2].shape}")
-                else:
-                    print(f"DEBUG: Scale {i} - tensor output with shape: {out.shape}")
         
         # Process each output scale
         for i, output in enumerate(outputs):
             if i >= len(weights):
-                print(f"DEBUG: Skipping scale {i} as no weight is defined (weights length: {len(weights)})")
                 break  # Skip if we don't have weights for this scale
             
             # Calculate scale factor for this level
             scale_factor = 0.25 * (2**i)  # 0.25, 0.5, 1.0
-            print(f"DEBUG: Processing scale {i} with scale_factor {scale_factor}, weight {weights[i]}")
             
             # Create downsampled target for this scale
             if scale_factor < 1.0:
                 # Use bilinear interpolation for continuous fields
                 scaled_target = F.interpolate(target, scale_factor=scale_factor, 
                                              mode='bilinear', align_corners=False)
-                print(f"DEBUG: Downsampled target from {target.shape} to {scaled_target.shape}")
             else:
                 scaled_target = target
-                print(f"DEBUG: Using original target shape {target.shape}")
             
             # Handle output format (tuple or tensor)
             if isinstance(output, tuple) and len(output) == 3:
@@ -137,20 +125,16 @@ class MultiScaleBlurFieldLoss(nn.Module):
                 dx, dy, mag = output
                 # Combine into a single tensor
                 pred = torch.cat([dx, dy, mag], dim=1)
-                print(f"DEBUG: Combined tuple components into tensor of shape {pred.shape}")
             else:
                 # If output is already a tensor
                 pred = output
-                print(f"DEBUG: Using tensor output directly, shape {pred.shape}")
             
             # Compute loss for this scale
             scale_loss = self.base_criterion(pred, scaled_target)
-            print(f"DEBUG: Scale {i} loss: {scale_loss.item():.6f}")
             
             # Apply weight to this scale's loss
             weighted_loss = weights[i] * scale_loss
             total_loss += weighted_loss
-            print(f"DEBUG: Scale {i} weighted loss ({weights[i]} * {scale_loss.item():.6f} = {weighted_loss.item():.6f})")
             
             # Store individual losses for logging
             scale_name = ['low', 'medium', 'high'][i] if i < 3 else f'scale_{i}'

@@ -1,19 +1,20 @@
 import os
 import sys
-import copy
+import time
 import argparse
 import logging
+import random
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
-from tqdm import tqdm
-import random
-import time
 from PIL import Image
+import math  # Add this import for math.log10
+from tqdm import tqdm
 
 # Add grandparent directory to path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))  # MIMO_UNet directory
@@ -40,6 +41,23 @@ except ImportError as e:
 # Import MIMO-UNet model and custom loss
 from MIMOUNet import build_MIMOUnet_net
 from blur_losses import MultiScaleBlurFieldLoss, BlurFieldLoss
+
+# Timer utilities
+_timer_dict = {}
+def start_timer(name):
+    import time
+    global _timer_dict
+    _timer_dict[name] = time.time()
+
+def stop_timer(name):
+    import time
+    global _timer_dict
+    if name in _timer_dict:
+        elapsed = time.time() - _timer_dict[name]
+        print(f"[TIMER] {name}: {elapsed:.2f} seconds elapsed.")
+        del _timer_dict[name]
+    else:
+        print(f"[TIMER] No timer found for '{name}'")
 
 def visualize_dataset_samples(dataset, output_dir, split, num_samples=5):
     """
@@ -179,14 +197,14 @@ def visualize_dataset_samples(dataset, output_dir, split, num_samples=5):
             if loaded_tensor.shape[0] >= 1:
                 dx = loaded_tensor[0].cpu().numpy()
                 im0 = axs[0].imshow(dx, cmap='coolwarm', vmin=dx_min, vmax=dx_max)
-                axs[0].set_title(f'dx (min={dx.min():.4f}, max={dx.max():.4f})')
+                axs[0].set_title(f'bx (min={dx.min():.4f}, max={dx.max():.4f})')
                 plt.colorbar(im0, ax=axs[0])
             
             # Plot dy with fixed scale
             if loaded_tensor.shape[0] >= 2:
                 dy = loaded_tensor[1].cpu().numpy()
                 im1 = axs[1].imshow(dy, cmap='coolwarm', vmin=dy_min, vmax=dy_max)
-                axs[1].set_title(f'dy (min={dy.min():.4f}, max={dy.max():.4f})')
+                axs[1].set_title(f'by (min={dy.min():.4f}, max={dy.max():.4f})')
                 plt.colorbar(im1, ax=axs[1])
             
             # Plot magnitude with fixed scale
@@ -240,6 +258,11 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
     pred_tensors = []
     fixed_images = []
     
+    # Define fixed color scales for components
+    dx_min, dx_max = -0.5, 0.5  # Adjust these based on your typical dx range
+    dy_min, dy_max = -0.5, 0.5  # Adjust these based on your typical dy range
+    mag_min, mag_max = 0.0, 1.0  # Adjust these based on your typical magnitude range
+    
     # Process each fixed validation sample
     with torch.no_grad():
         for i, sample in enumerate(fixed_val_loader):
@@ -280,15 +303,51 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
                 # Save ground truth blur field tensor
                 gt_tensor_path = os.path.join(gt_dir, f'sample_{i}_gt.pt')
                 torch.save(blur_field[0].cpu(), gt_tensor_path)
+                
+                # Create component visualization for ground truth
+                components_path = os.path.join(gt_dir, f'sample_{i}_components.png')
+                
+                # Get the ground truth tensor
+                gt_tensor = blur_field[0].cpu()
+                
+                # Create a component visualization
+                fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+                
+                # Plot dx with fixed scale
+                if gt_tensor.shape[0] >= 1:
+                    dx = gt_tensor[0].cpu().numpy()
+                    im0 = axs[0].imshow(dx, cmap='coolwarm', vmin=dx_min, vmax=dx_max)
+                    axs[0].set_title(f'bx (min={dx.min():.4f}, max={dx.max():.4f})')
+                    plt.colorbar(im0, ax=axs[0])
+                
+                # Plot dy with fixed scale
+                if gt_tensor.shape[0] >= 2:
+                    dy = gt_tensor[1].cpu().numpy()
+                    im1 = axs[1].imshow(dy, cmap='coolwarm', vmin=dy_min, vmax=dy_max)
+                    axs[1].set_title(f'by (min={dy.min():.4f}, max={dy.max():.4f})')
+                    plt.colorbar(im1, ax=axs[1])
+                
+                # Plot magnitude with fixed scale
+                if gt_tensor.shape[0] >= 3:
+                    mag = gt_tensor[2].cpu().numpy()
+                    im2 = axs[2].imshow(mag, cmap='viridis', vmin=mag_min, vmax=mag_max)
+                    axs[2].set_title(f'magnitude (min={mag.min():.4f}, max={mag.max():.4f})')
+                    plt.colorbar(im2, ax=axs[2])
+                
+                plt.tight_layout()
+                plt.savefig(components_path, dpi=300)
+                plt.close()
+                
+                print(f"  Saved GT component visualization to {components_path}")
             
             # Forward pass
             outputs = model(blur_img)
             
-            # Handle multi-scale outputs if present
+            # Get final prediction
             if isinstance(outputs, list):
                 # Use the highest resolution output
-                pred = outputs[-1]
-                print(f"Model returned multi-scale outputs, using highest resolution (shape: {pred.shape})")
+                pred = outputs[-1]  # This is a tuple of (dx, dy, m)
+                print(f"Model returned multi-scale outputs, using highest resolution (shape: {pred[0].shape})")
             else:
                 pred = outputs
                 print(f"Model returned single output (shape: {pred.shape})")
@@ -468,9 +527,24 @@ def train_model(args):
         blurred_dir=os.path.join(args.val_dir, 'blur'),
         gt_dir=os.path.join(args.val_dir, 'condition'),
         transform=transform,  # Same normalization
+        crop_size=args.crop_size,
         is_train=False,
     )
 
+    # Split validation dataset into validation and test sets
+    val_size = len(val_dataset)
+    test_size = val_size // 2
+    val_size = val_size - test_size
+    
+    from torch.utils.data import random_split
+    val_dataset, test_dataset = random_split(
+        val_dataset, 
+        [val_size, test_size],
+        generator=torch.Generator().manual_seed(42)  # Fixed seed for reproducibility
+    )
+    
+    logging.info(f"Split validation data: {val_size} validation samples, {test_size} test samples")
+    
     # Limit dataset size if specified
     if args.max_train_samples is not None and args.max_train_samples < len(train_dataset):
         logging.info(f"Limiting training dataset to {args.max_train_samples} samples (from {len(train_dataset)})")
@@ -479,9 +553,44 @@ def train_model(args):
         indices = list(range(args.max_train_samples))
         train_dataset = Subset(train_dataset, indices)
     
+    # Limit validation dataset size if specified
+    if args.max_val_samples is not None and args.max_val_samples < len(val_dataset):
+        logging.info(f"Limiting validation dataset to {args.max_val_samples} samples (from {len(val_dataset)})")
+        from torch.utils.data import Subset
+        indices = list(range(args.max_val_samples))
+        val_dataset = Subset(val_dataset, indices)
+    
     # Log dataset sizes
     logging.info(f"Train dataset size: {len(train_dataset)}")
     logging.info(f"Validation dataset size: {len(val_dataset)}")
+    logging.info(f"Test dataset size: {len(test_dataset)}")
+
+    # Log sample dimensions from each dataset
+    logging.info("Dataset sample dimensions:")
+    try:
+        # Get a sample from train dataset
+        train_sample = train_dataset[0]
+        if isinstance(train_sample, dict):
+            logging.info(f"Train sample - Input: {train_sample['blur'].shape}, Blur field: {train_sample['blur_field'].shape}")
+        elif isinstance(train_sample, (list, tuple)) and len(train_sample) >= 2:
+            logging.info(f"Train sample - Input: {train_sample[0].shape}, Blur field: {train_sample[1].shape}")
+        
+        # Get a sample from validation dataset
+        val_sample = val_dataset[0]
+        if isinstance(val_sample, dict):
+            logging.info(f"Val sample - Input: {val_sample['blur'].shape}, Blur field: {val_sample['blur_field'].shape}")
+        elif isinstance(val_sample, (list, tuple)) and len(val_sample) >= 2:
+            logging.info(f"Val sample - Input: {val_sample[0].shape}, Blur field: {val_sample[1].shape}")
+        
+        # Get a sample from test dataset
+        test_sample = test_dataset[0]
+        if isinstance(test_sample, dict):
+            logging.info(f"Test sample - Input: {test_sample['blur'].shape}, Blur field: {test_sample['blur_field'].shape}")
+        elif isinstance(test_sample, (list, tuple)) and len(test_sample) >= 2:
+            logging.info(f"Test sample - Input: {test_sample[0].shape}, Blur field: {test_sample[1].shape}")
+    except Exception as e:
+        logging.warning(f"Error getting sample dimensions: {e}")
+
     
     # Analyze and log dataset statistics
     try:
@@ -529,9 +638,9 @@ def train_model(args):
     )
     
     # Visualize dataset samples
-    logging.info("Visualizing dataset samples...")
-    visualize_dataset_samples(train_dataset, args.output_dir, "train", num_samples=10)
-    visualize_dataset_samples(val_dataset, args.output_dir, "val", num_samples=10)
+    # logging.info("Visualizing dataset samples...")
+    # visualize_dataset_samples(train_dataset, args.output_dir, "train", num_samples=10)
+    # visualize_dataset_samples(val_dataset, args.output_dir, "val", num_samples=10)
     
     train_loader = DataLoader(
         train_dataset, 
@@ -543,6 +652,15 @@ def train_model(args):
     
     val_loader = DataLoader(
         val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True
+    )
+    
+    # Create test dataloader
+    test_loader = DataLoader(
+        test_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
@@ -575,19 +693,14 @@ def train_model(args):
     logging.info("Using multi-scale blur field loss (weights [0.25,0.5,1])")
     
     # Define optimizer
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    
-    # Define learning rate scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, 
-        mode='min', 
-        factor=0.5, 
-        patience=args.patience
-    )
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     
     # Add a custom print function to log learning rate changes
     current_lr = optimizer.param_groups[0]['lr']
     logging.info(f"Initial learning rate: {current_lr}")
+    
+    # Add early stopping parameters
+    early_stopping_counter = 0
     
     # Training loop
     logging.info("Starting training...")
@@ -600,9 +713,12 @@ def train_model(args):
     val_losses = []
     val_psnrs = []
     val_mses = []  # Add MSE tracking list
+
     
     for epoch in range(args.epochs):
+        start_timer(f"epoch_{epoch+1}")
         # Training phase
+        start_timer(f"\ttrain_{epoch+1}")
         model.train()
         train_loss = 0.0
         
@@ -643,11 +759,13 @@ def train_model(args):
             
             # Update metrics
             train_loss += loss.item()
+        stop_timer(f"\ttrain_{epoch+1}")
         
         # Calculate average training loss
         train_loss /= len(train_loader)
         
         # Validation phase
+        start_timer(f"\tval_{epoch+1}")
         model.eval()
         val_loss = 0.0
         val_psnr = 0.0
@@ -679,13 +797,18 @@ def train_model(args):
                 
                 # Calculate MSE and PSNR (for monitoring only)
                 if isinstance(outputs, list):
-                    pred = outputs[-1]
+                    pred = outputs[-1]  # Get highest resolution output
                 else:
                     pred = outputs
+                
+                # Convert tuple output to tensor if needed
+                if isinstance(pred, tuple):
+                    pred = torch.cat([pred[0], pred[1], pred[2]], dim=1)
                 
                 mse = torch.mean((pred - blur_field) ** 2)
                 val_mse += mse.item()  # Track MSE
                 val_psnr += 10 * torch.log10(1.0 / mse).item()
+        stop_timer(f"\tval_{epoch+1}")
         
         # Calculate average validation metrics
         val_loss /= len(val_loader)
@@ -700,38 +823,39 @@ def train_model(args):
         val_mses.append(val_mse)  # Store MSE for plotting
         
         # Log metrics
-        logging.info(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val PSNR: {val_psnr:.2f} dB")
+        logging.info(f"Epoch {epoch+1}/{args.epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val PSNR: {val_psnr:.2f} dB, Val MSE: {val_mse:.4f}")
         writer.add_scalar('Loss/train', train_loss, epoch)
         writer.add_scalar('Loss/val', val_loss, epoch)
         writer.add_scalar('PSNR/val', val_psnr, epoch)
         writer.add_scalar('MSE/val', val_mse, epoch)  # Log MSE to TensorBoard
         
-        # Update learning rate scheduler
-        old_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(val_loss)
-        new_lr = optimizer.param_groups[0]['lr']
-
-        # Log if learning rate changed
-        if new_lr != old_lr:
-            logging.info(f"Learning rate changed from {old_lr:.6f} to {new_lr:.6f}")
+        stop_timer(f"epoch_{epoch+1}")
         
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
+            early_stopping_counter = 0  # Reset counter when validation loss improves
             
             # Save best model
             checkpoint = {
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
+                # 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'args': vars(args)
             }
             os.makedirs(os.path.join(args.output_dir, 'checkpoints'), exist_ok=True)
             torch.save(checkpoint, os.path.join(args.output_dir, 'checkpoints', 'best_model.pth'))
             logging.info(f"New best model saved with validation loss: {best_val_loss:.4f}")
+        else:
+            early_stopping_counter += 1
+            logging.info(f"Early stopping counter: {early_stopping_counter}/{args.patience}")
+            
+            if early_stopping_counter >= args.patience:
+                logging.info(f"Early stopping triggered after {epoch+1} epochs")
+                break
         
         # Save checkpoint at regular intervals
         if epoch % args.save_freq == 0:
@@ -740,7 +864,7 @@ def train_model(args):
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
+                # 'scheduler_state_dict': scheduler.state_dict(),
                 'best_val_loss': best_val_loss,
                 'args': vars(args)
             }
@@ -748,17 +872,20 @@ def train_model(args):
             
             # Save validation grid visualization
             logging.info(f"Creating validation grid visualization for epoch {epoch}...")
+            start_timer(f"save_validation_grid_{epoch}")
             grid_path = save_validation_grid(model, fixed_val_loader, epoch, args.output_dir, device)
+            stop_timer(f"save_validation_grid_{epoch}")
             logging.info(f"Saved validation grid to {grid_path}")
     
     # Final validation grid visualization
     logging.info(f"Creating final validation grid visualization...")
-    grid_path = save_validation_grid(model, fixed_val_loader, args.epochs, args.output_dir, device)
+    grid_path = save_validation_grid(model, fixed_val_loader, len(epochs_list), args.output_dir, device)
     logging.info(f"Saved final validation grid to {grid_path}")
     
     # Load best model for final evaluation
     best_checkpoint = torch.load(os.path.join(args.output_dir, 'checkpoints', 'best_model.pth'))
     model.load_state_dict(best_checkpoint['model_state_dict'])
+    # If you re-enable the scheduler, you may want to restore its state here
     logging.info(f"Loaded best model from epoch {best_checkpoint['epoch']+1} with validation loss: {best_checkpoint['best_val_loss']:.4f}")
     
     # Final validation grid visualization with best model
@@ -766,6 +893,71 @@ def train_model(args):
     grid_path = save_validation_grid(model, fixed_val_loader, 'best', args.output_dir, device)
     logging.info(f"Saved best model validation grid to {grid_path}")
     
+    # Evaluate on test set
+    logging.info("Evaluating best model on test set...")
+    model.eval()
+    test_loss = 0.0
+    test_psnr = 0.0
+    test_mse = 0.0
+
+    # Store individual sample losses and predictions for visualization
+    sample_losses = []
+    sample_images = []
+    sample_gt_tensors = []
+    sample_pred_tensors = []
+
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(test_loader):
+            # Handle different dataset formats
+            if isinstance(batch, dict):
+                # Dictionary format
+                blur_img = batch['blur'].to(device)
+                blur_field = batch['blur_field'].to(device)
+            elif isinstance(batch, (list, tuple)) and len(batch) >= 2:
+                # List/tuple format
+                blur_img = batch[0].to(device)
+                blur_field = batch[1].to(device)
+            else:
+                logging.warning(f"Unexpected batch format: {type(batch)}")
+                continue
+            
+            # Forward pass
+            outputs = model(blur_img)
+            
+            # Compute loss
+            loss, _ = criterion(outputs, blur_field)
+            
+            # Update metrics
+            test_loss += loss.item()
+            
+            # Calculate MSE and PSNR (for monitoring only)
+            if isinstance(outputs, list):
+                pred = outputs[-1]
+            else:
+                pred = outputs
+            
+            # Convert tuple output to tensor if needed
+            if isinstance(pred, tuple):
+                pred = torch.cat([pred[0], pred[1], pred[2]], dim=1)
+            
+            mse = F.mse_loss(pred, blur_field).item()
+            test_mse += mse
+            
+            # Calculate PSNR
+            psnr = -10 * math.log10(mse) if mse > 0 else 100
+            test_psnr += psnr
+            
+    # Calculate average test metrics
+    test_loss /= len(test_loader)
+    test_psnr /= len(test_loader)
+    test_mse /= len(test_loader)
+
+    # Log test results
+    logging.info(f"Test results with best model (epoch {best_epoch+1}):")
+    logging.info(f"  Test Loss: {test_loss:.4f}")
+    logging.info(f"  Test PSNR: {test_psnr:.2f} dB")
+    logging.info(f"  Test MSE: {test_mse:.6f}")
+
     # Close TensorBoard writer
     writer.close()
     
@@ -849,16 +1041,18 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, required=True, help='Path to output directory')
     parser.add_argument('--crop_size', type=int, default=256, help='Crop size for training')
     parser.add_argument('--max_train_samples', type=int, default=None, help='Maximum number of training samples to use')
+    parser.add_argument('--max_val_samples', type=int, default=None, help='Maximum number of validation samples to use')
     
     # Model arguments
     parser.add_argument('--model_name', type=str, default='MIMO-UNetPlus', help='Model architecture')
-    parser.add_argument('--base_channels', type=int, default=64, help='Number of base channels in the model')
+    parser.add_argument('--base_channels', type=int, default=32, help='Number of base channels in the model')
     parser.add_argument('--num_scales', type=int, default=3, help='Number of scales in the model')
     
     # Training arguments
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=100, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='Weight decay for optimizer')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for data loading')
     parser.add_argument('--save_freq', type=int, default=10, help='Frequency of saving checkpoints')
     parser.add_argument('--patience', type=int, default=10, help='Patience for learning rate scheduler')
@@ -873,3 +1067,4 @@ def parse_args():
 if __name__ == '__main__':
     args = parse_args()
     train_model(args)
+    
