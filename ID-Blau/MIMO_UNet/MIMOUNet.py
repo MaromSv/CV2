@@ -288,6 +288,68 @@ class MIMOUNetPlus(nn.Module):
 
         return outputs
 
+class DoubleConv(nn.Module):
+    """(Conv => BatchNorm => ReLU) * 2"""
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(out_ch),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class UNet(nn.Module):
+    def __init__(self, in_channels=3, out_channels=3, base_channels=64):
+        super().__init__()
+
+        # Encoder
+        self.enc1 = DoubleConv(in_channels, base_channels)
+        self.enc2 = DoubleConv(base_channels, base_channels * 2)
+        self.enc3 = DoubleConv(base_channels * 2, base_channels * 4)
+
+        # Bottleneck
+        self.bottleneck = DoubleConv(base_channels * 4, base_channels * 8)
+
+        # Decoder
+        self.up3 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, kernel_size=2, stride=2)
+        self.dec3 = DoubleConv(base_channels * 8, base_channels * 4)
+
+        self.up2 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, kernel_size=2, stride=2)
+        self.dec2 = DoubleConv(base_channels * 4, base_channels * 2)
+
+        self.up1 = nn.ConvTranspose2d(base_channels * 2, base_channels, kernel_size=2, stride=2)
+        self.dec1 = DoubleConv(base_channels * 2, base_channels)
+
+        self.out = nn.Conv2d(base_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        # Encoder
+        e1 = self.enc1(x)  # [B, C, H, W]
+        e2 = self.enc2(F.max_pool2d(e1, 2))  # [B, 2C, H/2, W/2]
+        e3 = self.enc3(F.max_pool2d(e2, 2))  # [B, 4C, H/4, W/4]
+
+        # Bottleneck
+        b = self.bottleneck(F.max_pool2d(e3, 2))  # [B, 8C, H/8, W/8]
+
+        # Decoder
+        d3 = self.up3(b)
+        d3 = self.dec3(torch.cat([d3, e3], dim=1))
+
+        d2 = self.up2(d3)
+        d2 = self.dec2(torch.cat([d2, e2], dim=1))
+
+        d1 = self.up1(d2)
+        d1 = self.dec1(torch.cat([d1, e1], dim=1))
+
+        return self.out(d1)  # [B, out_channels, H, W]
+
 
 def build_MIMOUnet_net(model_name):
     class ModelError(Exception):
@@ -301,6 +363,8 @@ def build_MIMOUnet_net(model_name):
         return MIMOUNetPlus()
     elif model_name == "MIMO-UNet":
         return MIMOUNet()
+    elif model_name == "UNet":
+        return UNet()
     raise ModelError('Wrong Model!\nYou should choose MIMO-UNetPlus or MIMO-UNet.')
 
 if __name__ == '__main__':

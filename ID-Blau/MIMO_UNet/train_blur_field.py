@@ -12,6 +12,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 from PIL import Image
 import math  # Add this import for math.log10
 from tqdm import tqdm
@@ -257,6 +258,7 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
     # Lists to store tensors and image paths
     pred_tensors = []
     fixed_images = []
+    bar_paths = []
     
     # Define fixed color scales for components
     dx_min, dx_max = -0.5, 0.5  # Adjust these based on your typical dx range
@@ -339,12 +341,6 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             
             # Forward pass
             outputs = model(blur_img)
-            logging.info(f"Input shape: {blur_img.shape}")
-            logging.info(f"GT shape: {blur_field.shape}")
-            logging.info(f"Prediction shape: {pred.shape}")
-            logging.info(f"Sample {i} - Input image range: ({blur_img[0,0].min().item():.4f}, {blur_img[0,1].min().item():.4f}, {blur_img[0,2].min().item():.4f}), ({blur_img[0,0].max().item():.4f}, {blur_img[0,1].max().item():.4f}, {blur_img[0,2].max().item():.4f})")
-            logging.info(f"Sample {i} - Ground truth blur field range: ({blur_field[0].min().item():.4f}, {blur_field[1].min().item():.4f}, {blur_field[2].min().item():.4f}), ({blur_field[0].max().item():.4f}, {blur_field[1].max().item():.4f}, {blur_field[2].max().item():.4f})")
-            logging.info(f"Sample {i} - Predicted blur field range: ({outputs[0].min().item():.4f}, {outputs[1].min().item():.4f}, {outputs[2].min().item():.4f}), ({outputs[0].max().item():.4f}, {outputs[1].max().item():.4f}, {outputs[2].max().item():.4f})")
             
             # Get final prediction
             if isinstance(outputs, list):
@@ -354,6 +350,19 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             else:
                 pred = outputs
                 print(f"Model returned single output (shape: {pred.shape})")
+            
+            logging.info(f"Input shape: {blur_img.shape}")
+            logging.info(f"GT shape: {blur_field.shape}")
+            logging.info(f"Prediction shape: {pred.shape}")
+
+            # Angles in (min, max, mean, median)
+            input_angle = ((torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).min().item(), (torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).max().item(), (torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).mean().item(), (torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).median().item())
+            gt_angle = ((torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).min().item(), (torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).max().item(), (torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).mean().item(), (torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).median().item())
+            pred_angle = ((torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).min().item(), (torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).max().item(), (torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).mean().item(), (torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).median().item())
+
+            logging.info(f"Sample {i} - Input image range: ({blur_img[0,0].min().item():.4f}, {blur_img[0,1].min().item():.4f}, {blur_img[0,2].min().item():.4f}), ({blur_img[0,0].max().item():.4f}, {blur_img[0,1].max().item():.4f}, {blur_img[0,2].max().item():.4f}), angle: {input_angle}")
+            logging.info(f"Sample {i} - Ground truth blur field range: ({blur_field[0,0].min().item():.4f}, {blur_field[0,1].min().item():.4f}, {blur_field[0,2].min().item():.4f}), ({blur_field[0,0].max().item():.4f}, {blur_field[0,1].max().item():.4f}, {blur_field[0,2].max().item():.4f}), angle: {gt_angle}")
+            logging.info(f"Sample {i} - Predicted blur field range: ({pred[0,0].min().item():.4f}, {pred[0,1].min().item():.4f}, {pred[0,2].min().item():.4f}), ({pred[0,0].max().item():.4f}, {pred[0,1].max().item():.4f}, {pred[0,2].max().item():.4f}), angle: {pred_angle}")
             
             # Save prediction tensor
             pred_tensor_path = os.path.join(epoch_dir, f'sample_{i}_pred.pt')
@@ -376,28 +385,26 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             target_tensor = blur_field[0]
             if target_tensor.dim() == 3:
                 target_tensor = target_tensor.unsqueeze(0)
-            # Extract components
-            pred_bx, pred_by = pred_tensor[:, 0:1, :, :], pred_tensor[:, 1:2, :, :]
-            pred_mag = pred_tensor[:, 2:3, :, :]
-            target_bx, target_by = target_tensor[:, 0:1, :, :], target_tensor[:, 1:2, :, :]
-            target_mag = target_tensor[:, 2:3, :, :]
-            # Directional loss (cosine similarity)
-            pred_vectors = torch.cat([pred_bx, pred_by], dim=1)
-            target_vectors = torch.cat([target_bx, target_by], dim=1)
-            pred_norm = torch.norm(pred_vectors, p=2, dim=1, keepdim=True) + 1e-8
-            target_norm = torch.norm(target_vectors, p=2, dim=1, keepdim=True) + 1e-8
-            pred_normalized = pred_vectors / pred_norm
-            target_normalized = target_vectors / target_norm
+
+            pred_bx, pred_by = pred_tensor[:, 0:1], pred_tensor[:, 1:2]
+            pred_mag = pred_tensor[:, 2:3]
+            target_bx, target_by = target_tensor[:, 0:1], target_tensor[:, 1:2]
+            target_mag = target_tensor[:, 2:3]
+
+            pred_vec = torch.cat([pred_bx, pred_by], dim=1)
+            target_vec = torch.cat([target_bx, target_by], dim=1)
+            pred_norm = torch.norm(pred_vec, p=2, dim=1, keepdim=True) + 1e-8
+            target_norm = torch.norm(target_vec, p=2, dim=1, keepdim=True) + 1e-8
+            pred_normalized = pred_vec / pred_norm
+            target_normalized = target_vec / target_norm
             cos_sim = (pred_normalized * target_normalized).sum(dim=1, keepdim=True)
             dir_loss = (1 - cos_sim).mean().item()
-            # Magnitude loss (Charbonnier)
+
             charbonnier = CharbonnierLoss()
             mag_loss = charbonnier(pred_mag, target_mag).item()
-            # MSE loss
             mse_loss = F.mse_loss(pred_tensor, target_tensor).item()
-            # Charbonnier loss (all channels)
             charbonnier_loss = charbonnier(pred_tensor, target_tensor).item()
-            # Plot bar graph
+
             bar_names = ['dir_loss', 'mag_loss', 'mse_loss', 'CharbonnierLoss']
             bar_values = [dir_loss, mag_loss, mse_loss, charbonnier_loss]
             plt.figure(figsize=(6, 4))
@@ -408,10 +415,26 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
                 plt.text(bar.get_x() + bar.get_width() / 2, val, f'{val:.4f}', ha='center', va='bottom')
             plt.tight_layout()
             bar_path = os.path.join(epoch_dir, f'sample_{i}_loss_bar.png')
+            bar_paths.append(bar_path)
             plt.savefig(bar_path, dpi=200)
             plt.close()
             print(f"Saved loss bar plot to {bar_path}")
             # --- END: Per-image loss bar plot ---
+
+    # --- BEGIN: Combine bar plots into grid ---
+    fig, axs = plt.subplots(2, 3, figsize=(15, 10))
+    axs = axs.flatten()
+    for i in range(5):
+        bar_img = mpimg.imread(bar_paths[i])
+        axs[i].imshow(bar_img)
+        axs[i].axis('off')
+        axs[i].set_title(f"Sample {i}")
+    axs[5].axis('off')
+    bar_grid_path = os.path.join(epoch_dir, 'loss_bars_grid.png')
+    plt.tight_layout()
+    plt.savefig(bar_grid_path, dpi=300)
+    plt.close()
+    print(f"Saved combined bar plot grid to {bar_grid_path}")
     
     # Create grid visualization for predictions
     try:
@@ -729,7 +752,9 @@ def train_model(args):
     base_loss = BlurFieldLoss(
         lambda_dir=args.lambda_dir,
         lambda_mag=args.lambda_mag,
-        lambda_mse=args.lambda_mse
+        lambda_mse=args.lambda_mse,
+        lambda_l1=args.lambda_l1,
+        is_dir=args.is_dir
     )
     criterion = MultiScaleBlurFieldLoss(
         base_criterion=base_loss,
@@ -1125,6 +1150,7 @@ def parse_args():
     parser.add_argument('--lambda_mag', type=float, default=1.0, help='Weight for magnitude loss')
     parser.add_argument('--lambda_l1', type=float, default=1.0, help='Weight for l1 loss')
     parser.add_argument('--lambda_mse', type=float, default=1.0, help='Weight for mse loss')
+    parser.add_argument('--is_dir', action='store_true', default=False, help='If using direction loss')
     
     return parser.parse_args()
 

@@ -9,7 +9,7 @@ class BlurFieldLoss(nn.Module):
     - Cosine similarity loss for direction accuracy
     - Magnitude loss for blur strength accuracy
     """
-    def __init__(self, lambda_dir=0.5, lambda_mag=0.5, lambda_l1=0.5, lambda_mse=0.5):
+    def __init__(self, lambda_dir=0.5, lambda_mag=0.5, lambda_l1=0.5, lambda_mse=0.5, is_dir=False):
         super(BlurFieldLoss, self).__init__()
         self.lambda_dir = lambda_dir
         self.lambda_mag = lambda_mag
@@ -17,6 +17,7 @@ class BlurFieldLoss(nn.Module):
         self.lambda_mse = lambda_mse
         self.charbonnier = CharbonnierLoss()
         self.mse_loss = nn.MSELoss()
+        self.is_dir = is_dir
         
     def forward(self, pred, target):
         # Extract components
@@ -26,30 +27,38 @@ class BlurFieldLoss(nn.Module):
         target_bx, target_by = target[:, 0:1, :, :], target[:, 1:2, :, :]
         target_mag = target[:, 2:3, :, :]
         
-        # Directional loss (cosine similarity)
-        pred_vectors = torch.cat([pred_bx, pred_by], dim=1)
-        target_vectors = torch.cat([target_bx, target_by], dim=1)
-        
-        # Normalize vectors for cosine similarity
-        pred_norm = torch.norm(pred_vectors, p=2, dim=1, keepdim=True) + 1e-8
-        target_norm = torch.norm(target_vectors, p=2, dim=1, keepdim=True) + 1e-8
-        
-        pred_normalized = pred_vectors / pred_norm
-        target_normalized = target_vectors / target_norm
-        
-        # Compute cosine similarity
-        cos_sim = (pred_normalized * target_normalized).sum(dim=1, keepdim=True)
-        dir_loss = (1 - cos_sim).mean()
-        
-        # Magnitude loss
-        mag_loss = self.charbonnier(pred_mag, target_mag)
+        if self.is_dir:
+            # Directional loss (cosine similarity)
+            pred_vectors = torch.cat([pred_bx, pred_by], dim=1)
+            target_vectors = torch.cat([target_bx, target_by], dim=1)
+            
+            # Normalize vectors for cosine similarity
+            pred_norm = torch.norm(pred_vectors, p=2, dim=1, keepdim=True) + 1e-8
+            target_norm = torch.norm(target_vectors, p=2, dim=1, keepdim=True) + 1e-8
+            
+            pred_normalized = pred_vectors / pred_norm
+            target_normalized = target_vectors / target_norm
+            
+            # Compute cosine similarity
+            cos_sim = (pred_normalized * target_normalized).sum(dim=1, keepdim=True)
+            dir_loss = (1 - cos_sim).mean()
+            
+            # Magnitude loss
+            mag_loss = self.charbonnier(pred_mag, target_mag)
 
-        mse = self.mse_loss(pred, target)
-        l1 = self.charbonnier(pred, target)
-        
-        # Combined loss
-        total_loss = self.lambda_dir * dir_loss + self.lambda_mag * mag_loss + self.lambda_l1 * l1 + self.lambda_mse * mse
-
+            mse = self.mse_loss(pred, target)
+            l1 = self.charbonnier(pred, target)
+            
+            # Combined loss
+            total_loss = self.lambda_dir * dir_loss + self.lambda_mag * mag_loss + self.lambda_l1 * l1 + self.lambda_mse * mse
+        else:
+            # MSE loss for magnitude only
+            mse = self.mse_loss(pred_mag, target_mag)
+            l1 = self.charbonnier(pred_mag, target_mag)
+            
+            # combine mse and l1
+            total_loss = self.lambda_mse * mse + self.lambda_l1 * l1
+            
         return total_loss
 
 class CharbonnierLoss(nn.Module):
