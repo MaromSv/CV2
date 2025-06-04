@@ -9,11 +9,14 @@ class BlurFieldLoss(nn.Module):
     - Cosine similarity loss for direction accuracy
     - Magnitude loss for blur strength accuracy
     """
-    def __init__(self, lambda_dir=0.5, lambda_mag=0.5):
+    def __init__(self, lambda_dir=0.5, lambda_mag=0.5, lambda_l1=0.5, lambda_mse=0.5):
         super(BlurFieldLoss, self).__init__()
         self.lambda_dir = lambda_dir
         self.lambda_mag = lambda_mag
+        self.lambda_l1 = lambda_l1
+        self.lambda_mse = lambda_mse
         self.charbonnier = CharbonnierLoss()
+        self.mse_loss = nn.MSELoss()
         
     def forward(self, pred, target):
         # Extract components
@@ -22,9 +25,6 @@ class BlurFieldLoss(nn.Module):
         
         target_bx, target_by = target[:, 0:1, :, :], target[:, 1:2, :, :]
         target_mag = target[:, 2:3, :, :]
-        
-        # L1 loss on the entire field
-        l1_loss = self.charbonnier(pred, target)
         
         # Directional loss (cosine similarity)
         pred_vectors = torch.cat([pred_bx, pred_by], dim=1)
@@ -43,10 +43,13 @@ class BlurFieldLoss(nn.Module):
         
         # Magnitude loss
         mag_loss = self.charbonnier(pred_mag, target_mag)
+
+        mse = self.mse_loss(pred, target)
+        l1 = self.charbonnier(pred, target)
         
         # Combined loss
-        total_loss = l1_loss + self.lambda_dir * dir_loss + self.lambda_mag * mag_loss
-        
+        total_loss = self.lambda_dir * dir_loss + self.lambda_mag * mag_loss + self.lambda_l1 * l1 + self.lambda_mse * mse
+
         return total_loss
 
 class CharbonnierLoss(nn.Module):

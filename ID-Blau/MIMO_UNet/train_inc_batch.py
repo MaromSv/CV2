@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import math  # Add this import for math.log10
 from tqdm import tqdm
+from torch.cuda.amp import autocast, GradScaler
 
 # Add grandparent directory to path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))  # MIMO_UNet directory
@@ -40,7 +41,7 @@ except ImportError as e:
 
 # Import MIMO-UNet model and custom loss
 from MIMOUNet import build_MIMOUnet_net
-from blur_losses import MultiScaleBlurFieldLoss, BlurFieldLoss, CharbonnierLoss
+from blur_losses import MultiScaleBlurFieldLoss, BlurFieldLoss
 
 # Timer utilities
 _timer_dict = {}
@@ -278,6 +279,9 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             else:
                 print(f"Unexpected sample format: {type(sample)}")
                 continue
+            
+            print(f"Sample {i} - Input image range: {blur_img.min().item():.4f} to {blur_img.max().item():.4f}")
+            print(f"Sample {i} - GT blur field range: {blur_field.min().item():.4f} to {blur_field.max().item():.4f}")
                 
             # Save original image
             img_np = blur_img[0].detach().cpu().permute(1, 2, 0).numpy()
@@ -339,12 +343,6 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             
             # Forward pass
             outputs = model(blur_img)
-            logging.info(f"Input shape: {blur_img.shape}")
-            logging.info(f"GT shape: {blur_field.shape}")
-            logging.info(f"Prediction shape: {pred.shape}")
-            logging.info(f"Sample {i} - Input image range: ({blur_img[0,0].min().item():.4f}, {blur_img[0,1].min().item():.4f}, {blur_img[0,2].min().item():.4f}), ({blur_img[0,0].max().item():.4f}, {blur_img[0,1].max().item():.4f}, {blur_img[0,2].max().item():.4f})")
-            logging.info(f"Sample {i} - Ground truth blur field range: ({blur_field[0].min().item():.4f}, {blur_field[1].min().item():.4f}, {blur_field[2].min().item():.4f}), ({blur_field[0].max().item():.4f}, {blur_field[1].max().item():.4f}, {blur_field[2].max().item():.4f})")
-            logging.info(f"Sample {i} - Predicted blur field range: ({outputs[0].min().item():.4f}, {outputs[1].min().item():.4f}, {outputs[2].min().item():.4f}), ({outputs[0].max().item():.4f}, {outputs[1].max().item():.4f}, {outputs[2].max().item():.4f})")
             
             # Get final prediction
             if isinstance(outputs, list):
@@ -355,6 +353,9 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
                 pred = outputs
                 print(f"Model returned single output (shape: {pred.shape})")
             
+            # Print prediction stats
+            print(f"Prediction range: {pred.min().item():.4f} to {pred.max().item():.4f}")
+                
             # Save prediction tensor
             pred_tensor_path = os.path.join(epoch_dir, f'sample_{i}_pred.pt')
             torch.save(pred[0].cpu(), pred_tensor_path)
@@ -365,53 +366,6 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             # Also save ground truth tensor in epoch directory for comparison
             gt_tensor_path = os.path.join(epoch_dir, f'sample_{i}_gt.pt')
             torch.save(blur_field[0].cpu(), gt_tensor_path)
-
-            # --- BEGIN: Per-image loss bar plot ---
-            # Use the same loss formulas as in BlurFieldLoss, but unweighted
-            
-            # pred[0] is [1, 3, H, W], blur_field[0] is [3, H, W] or [1, 3, H, W]
-            pred_tensor = pred[0] if isinstance(pred, tuple) else pred
-            if pred_tensor.dim() == 3:
-                pred_tensor = pred_tensor.unsqueeze(0)
-            target_tensor = blur_field[0]
-            if target_tensor.dim() == 3:
-                target_tensor = target_tensor.unsqueeze(0)
-            # Extract components
-            pred_bx, pred_by = pred_tensor[:, 0:1, :, :], pred_tensor[:, 1:2, :, :]
-            pred_mag = pred_tensor[:, 2:3, :, :]
-            target_bx, target_by = target_tensor[:, 0:1, :, :], target_tensor[:, 1:2, :, :]
-            target_mag = target_tensor[:, 2:3, :, :]
-            # Directional loss (cosine similarity)
-            pred_vectors = torch.cat([pred_bx, pred_by], dim=1)
-            target_vectors = torch.cat([target_bx, target_by], dim=1)
-            pred_norm = torch.norm(pred_vectors, p=2, dim=1, keepdim=True) + 1e-8
-            target_norm = torch.norm(target_vectors, p=2, dim=1, keepdim=True) + 1e-8
-            pred_normalized = pred_vectors / pred_norm
-            target_normalized = target_vectors / target_norm
-            cos_sim = (pred_normalized * target_normalized).sum(dim=1, keepdim=True)
-            dir_loss = (1 - cos_sim).mean().item()
-            # Magnitude loss (Charbonnier)
-            charbonnier = CharbonnierLoss()
-            mag_loss = charbonnier(pred_mag, target_mag).item()
-            # MSE loss
-            mse_loss = F.mse_loss(pred_tensor, target_tensor).item()
-            # Charbonnier loss (all channels)
-            charbonnier_loss = charbonnier(pred_tensor, target_tensor).item()
-            # Plot bar graph
-            bar_names = ['dir_loss', 'mag_loss', 'mse_loss', 'CharbonnierLoss']
-            bar_values = [dir_loss, mag_loss, mse_loss, charbonnier_loss]
-            plt.figure(figsize=(6, 4))
-            bars = plt.bar(bar_names, bar_values, color=['blue', 'orange', 'green', 'red'])
-            plt.ylabel('Loss Value')
-            plt.title(f'Sample {i} Loss Breakdown')
-            for bar, val in zip(bars, bar_values):
-                plt.text(bar.get_x() + bar.get_width() / 2, val, f'{val:.4f}', ha='center', va='bottom')
-            plt.tight_layout()
-            bar_path = os.path.join(epoch_dir, f'sample_{i}_loss_bar.png')
-            plt.savefig(bar_path, dpi=200)
-            plt.close()
-            print(f"Saved loss bar plot to {bar_path}")
-            # --- END: Per-image loss bar plot ---
     
     # Create grid visualization for predictions
     try:
@@ -528,6 +482,7 @@ def train_model(args):
     
     # Create datasets and dataloaders
     from torchvision import transforms
+    import torch.nn.functional as F
     
     # Define transforms for MIMO-UNet (consistent with ID-Blau)
     class MIMONormalize:
@@ -728,25 +683,19 @@ def train_model(args):
     # Multi-scale supervision: build a BlurFieldLoss as our base, then wrap it
     base_loss = BlurFieldLoss(
         lambda_dir=args.lambda_dir,
-        lambda_mag=args.lambda_mag,
-        lambda_mse=args.lambda_mse
+        lambda_mag=args.lambda_mag
     )
     criterion = MultiScaleBlurFieldLoss(
         base_criterion=base_loss,
         scale_weights=[0.25, 0.5, 1.0],     # head-wise weights: low, mid, full
         use_consistency=True,               # optional up/down consistency
-        consistency_weight=0.2
+        consistency_weight=0.1
     )
+    logging.info("Using multi-scale blur field loss (weights [0.25,0.5,1])")
     
-    # --- Warmup for scale_weights ---
-    warmup_epochs = 10  # You can change this value as needed
-    initial_weights = [0.25, 0.5, 1.0]
-    final_weights = [0.25, 0.5, 1.0]
-    
-    logging.info(f"Using multi-scale blur field loss: {initial_weights} -> {final_weights}")
-
     # Define optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scaler = GradScaler()
     
     # Add a custom print function to log learning rate changes
     current_lr = optimizer.param_groups[0]['lr']
@@ -770,15 +719,6 @@ def train_model(args):
     
     for epoch in range(args.epochs):
         start_timer(f"epoch_{epoch+1}")
-        # Compute warmup factor and update scale weights
-        warmup_factor = min(1.0, epoch / warmup_epochs)
-        new_weights = [
-            (1-warmup_factor)*initial_weights[i] + warmup_factor*final_weights[i]
-            for i in range(len(final_weights))
-        ]
-        criterion.update_scale_weights(new_weights)
-        logging.info(f"Using multi-scale blur field loss: {new_weights}")
-        
         # Training phase
         start_timer(f"\ttrain_{epoch+1}")
         model.train()
@@ -800,14 +740,12 @@ def train_model(args):
             
             # Forward pass
             optimizer.zero_grad()
-            outputs = model(blur_img)
-            
-            # Compute loss
-            loss, losses_dict = criterion(outputs, blur_field)
-            
-            # Backward pass and optimize
-            loss.backward()
-            optimizer.step()
+            with autocast():
+                outputs = model(blur_img)
+                loss, losses_dict = criterion(outputs, blur_field)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             # Log losses
             writer.add_scalar('Loss/total', losses_dict['loss_total'], epoch * len(train_loader) + batch_idx)
@@ -848,11 +786,10 @@ def train_model(args):
                     logging.warning(f"Unexpected batch format: {type(batch)}")
                     continue
                 
-                # Forward pass
-                outputs = model(blur_img)
-                
-                # Compute loss
-                loss, losses_dict = criterion(outputs, blur_field)
+                # Forward pass with autocast
+                with autocast():
+                    outputs = model(blur_img)
+                    loss, losses_dict = criterion(outputs, blur_field)
                 
                 # Update metrics
                 val_loss += loss.item()
@@ -1123,8 +1060,6 @@ def parse_args():
     parser.add_argument('--multi_scale_loss', action='store_true', help='Use multi-scale loss')
     parser.add_argument('--lambda_dir', type=float, default=1.0, help='Weight for direction loss')
     parser.add_argument('--lambda_mag', type=float, default=1.0, help='Weight for magnitude loss')
-    parser.add_argument('--lambda_l1', type=float, default=1.0, help='Weight for l1 loss')
-    parser.add_argument('--lambda_mse', type=float, default=1.0, help='Weight for mse loss')
     
     return parser.parse_args()
 

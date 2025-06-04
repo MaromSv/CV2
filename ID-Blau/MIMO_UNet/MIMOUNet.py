@@ -33,8 +33,8 @@ class AFF(nn.Module):
     def __init__(self, in_channel, out_channel):
         super(AFF, self).__init__()
         self.conv = nn.Sequential(
-            BasicConv(in_channel, out_channel, kernel_size=1, stride=1, relu=True),
-            BasicConv(out_channel, out_channel, kernel_size=3, stride=1, relu=False)
+            BasicConv(in_channel, out_channel, kernel_size=1, stride=1, relu=True, norm=True),
+            BasicConv(out_channel, out_channel, kernel_size=3, stride=1, relu=False, norm=True)
         )
 
     def forward(self, x1, x2, x4):
@@ -46,13 +46,13 @@ class SCM(nn.Module):
     def __init__(self, out_plane):
         super(SCM, self).__init__()
         self.main = nn.Sequential(
-            BasicConv(3, out_plane//4, kernel_size=3, stride=1, relu=True),
-            BasicConv(out_plane // 4, out_plane // 2, kernel_size=1, stride=1, relu=True),
-            BasicConv(out_plane // 2, out_plane // 2, kernel_size=3, stride=1, relu=True),
-            BasicConv(out_plane // 2, out_plane-3, kernel_size=1, stride=1, relu=True)
+            BasicConv(3, out_plane//4, kernel_size=3, stride=1, relu=True, norm=True),
+            BasicConv(out_plane // 4, out_plane // 2, kernel_size=1, stride=1, relu=True, norm=True),
+            BasicConv(out_plane // 2, out_plane // 2, kernel_size=3, stride=1, relu=True, norm=True),
+            BasicConv(out_plane // 2, out_plane-3, kernel_size=1, stride=1, relu=True, norm=True)
         )
 
-        self.conv = BasicConv(out_plane, out_plane, kernel_size=1, stride=1, relu=False)
+        self.conv = BasicConv(out_plane, out_plane, kernel_size=1, stride=1, relu=False, norm=True)
 
     def forward(self, x):
         x = torch.cat([x, self.main(x)], dim=1)
@@ -62,7 +62,7 @@ class SCM(nn.Module):
 class FAM(nn.Module):
     def __init__(self, channel):
         super(FAM, self).__init__()
-        self.merge = BasicConv(channel, channel, kernel_size=3, stride=1, relu=False)
+        self.merge = BasicConv(channel, channel, kernel_size=3, stride=1, relu=False, norm=True)
 
     def forward(self, x1, x2):
         x = x1 * x2
@@ -83,11 +83,11 @@ class MIMOUNet(nn.Module):
         ])
 
         self.feat_extract = nn.ModuleList([
-            BasicConv(3, base_channel, kernel_size=3, relu=True, stride=1),
-            BasicConv(base_channel, base_channel*2, kernel_size=3, relu=True, stride=2),
-            BasicConv(base_channel*2, base_channel*4, kernel_size=3, relu=True, stride=2),
-            BasicConv(base_channel*4, base_channel*2, kernel_size=4, relu=True, stride=2, transpose=True),
-            BasicConv(base_channel*2, base_channel, kernel_size=4, relu=True, stride=2, transpose=True),
+            BasicConv(3, base_channel, kernel_size=3, relu=True, stride=1, norm=True),
+            BasicConv(base_channel, base_channel*2, kernel_size=3, relu=True, stride=2, norm=True),
+            BasicConv(base_channel*2, base_channel*4, kernel_size=3, relu=True, stride=2, norm=True),
+            BasicConv(base_channel*4, base_channel*2, kernel_size=4, relu=True, stride=2, transpose=True, norm=True),
+            BasicConv(base_channel*2, base_channel, kernel_size=4, relu=True, stride=2, transpose=True, norm=True),
             BasicConv(base_channel, 3, kernel_size=3, relu=False, stride=1)
         ])
 
@@ -98,8 +98,8 @@ class MIMOUNet(nn.Module):
         ])
 
         self.Convs = nn.ModuleList([
-            BasicConv(base_channel * 4, base_channel * 2, kernel_size=1, relu=True, stride=1),
-            BasicConv(base_channel * 2, base_channel, kernel_size=1, relu=True, stride=1),
+            BasicConv(base_channel * 4, base_channel * 2, kernel_size=1, relu=True, stride=1, norm=True),
+            BasicConv(base_channel * 2, base_channel, kernel_size=1, relu=True, stride=1, norm=True),
         ])
 
         self.ConvsOut = nn.ModuleList(
@@ -199,11 +199,11 @@ class MIMOUNetPlus(nn.Module):
         ])
 
         self.feat_extract = nn.ModuleList([
-            BasicConv(3, base_channel, kernel_size=3, relu=True, stride=1),
-            BasicConv(base_channel, base_channel*2, kernel_size=3, relu=True, stride=2),
-            BasicConv(base_channel*2, base_channel*4, kernel_size=3, relu=True, stride=2),
-            BasicConv(base_channel*4, base_channel*2, kernel_size=4, relu=True, stride=2, transpose=True),
-            BasicConv(base_channel*2, base_channel, kernel_size=4, relu=True, stride=2, transpose=True),
+            BasicConv(3, base_channel, kernel_size=3, relu=True, stride=1, norm=True),
+            BasicConv(base_channel, base_channel*2, kernel_size=3, relu=True, stride=2, norm=True),
+            BasicConv(base_channel*2, base_channel*4, kernel_size=3, relu=True, stride=2, norm=True),
+            BasicConv(base_channel*4, base_channel*2, kernel_size=4, relu=True, stride=2, transpose=True, norm=True),
+            BasicConv(base_channel*2, base_channel, kernel_size=4, relu=True, stride=2, transpose=True, norm=True),
             BasicConv(base_channel, 3, kernel_size=3, relu=False, stride=1)
         ])
 
@@ -214,8 +214,8 @@ class MIMOUNetPlus(nn.Module):
         ])
 
         self.Convs = nn.ModuleList([
-            BasicConv(base_channel * 4, base_channel * 2, kernel_size=1, relu=True, stride=1),
-            BasicConv(base_channel * 2, base_channel, kernel_size=1, relu=True, stride=1),
+            BasicConv(base_channel * 4, base_channel * 2, kernel_size=1, relu=True, stride=1, norm=True),
+            BasicConv(base_channel * 2, base_channel, kernel_size=1, relu=True, stride=1, norm=True),
         ])
 
         self.ConvsOut = nn.ModuleList(
