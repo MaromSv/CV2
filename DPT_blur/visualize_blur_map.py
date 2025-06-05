@@ -315,16 +315,16 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
     
     # Create and display the color wheel with reduced saturation to match alpha
     wheel = create_color_wheel(size=200, saturation=0.5)  # Match alpha value of 0.5
-    ax_legend.imshow(wheel)
+    ax_legend.imshow(wheel, origin='lower')
     
     # Add title above the color wheel
     plt.figtext(0.16, 0.88, title, ha='center', fontsize=15, fontweight='bold')
     
     # Add orientation labels
     radius = 110
-    ax_legend.text(100, 100-radius-10, "90°", ha='center', va='center', fontweight='bold', color='black')
+    ax_legend.text(100, 100-radius-10, "270°", ha='center', va='center', fontweight='bold', color='black')
     ax_legend.text(100+radius+10, 100, "0°", ha='center', va='center', fontweight='bold', color='black')
-    ax_legend.text(100, 100+radius+10, "270°", ha='center', va='center', fontweight='bold', color='black')
+    ax_legend.text(100, 100+radius+10, "90°", ha='center', va='center', fontweight='bold', color='black')
     ax_legend.text(100-radius-10, 100, "180°", ha='center', va='center', fontweight='bold', color='black')
     
     # Add diagonal line for magnitude and orientation with arrows
@@ -332,7 +332,7 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
     arrow_length = 60  # Length of each arrow from center
     
     # Draw arrows from center in both directions
-    ax_legend.arrow(center, center, arrow_length*0.7, -arrow_length*0.7, 
+    ax_legend.arrow(center, center, arrow_length*0.7, arrow_length*0.7, 
                    head_width=8, head_length=10, fc='k', ec='k', 
                    linewidth=2, length_includes_head=True)
     
@@ -344,13 +344,13 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
     from matplotlib.patches import PathPatch
     
     # Add "Magnitude" text along the line
-    ax_legend.text(100, 80, "Magnitude", ha='center', va='center', fontweight='bold', rotation=45, color='black')
+    ax_legend.text(100, 120, "Magnitude", ha='center', va='center', fontweight='bold', rotation=45, color='black')
     
     # Add "Orientation" text curved around the edge
     angle = 45  # Position at 45 degrees (top-right)
     x = 100 + 80 * np.cos(np.radians(angle))
     y = 100 - 80 * np.sin(np.radians(angle))
-    ax_legend.text(x+20, y-20, "Orientation", ha='center', va='center', fontweight='bold',
+    ax_legend.text(x+20, y+20, "Orientation", ha='center', va='center', fontweight='bold',
                   rotation=-45, color='black')
     
     ax_legend.axis('off')
@@ -533,7 +533,7 @@ def visualize_multiple_blur_fields(tensor_list, image_path_list=None, output_pat
     
     # Add the color wheel legend in the first position
     ax_legend = fig.add_subplot(gs[0, 0])
-    ax_legend.imshow(wheel)
+    ax_legend.imshow(wheel, origin='lower')
     
     # Add title and explanation text ABOVE the color wheel using figure coordinates
     fig.text(0.25, 0.90, "Blur Field Color Legend", ha='center', va='center', 
@@ -542,16 +542,16 @@ def visualize_multiple_blur_fields(tensor_list, image_path_list=None, output_pat
     # Add orientation labels to the color wheel
     center = 150  # Center of the wheel (half of size)
     radius = 160  # Slightly larger than wheel radius for labels
-    ax_legend.text(center, center-radius-10, "90°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
+    ax_legend.text(center, center-radius-10, "270°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
     ax_legend.text(center+radius+10, center, "0°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
-    ax_legend.text(center, center+radius+10, "270°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
+    ax_legend.text(center, center+radius+10, "90°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
     ax_legend.text(center-radius-10, center, "180°", ha='center', va='center', fontweight='bold', color='black', fontsize=12)
     
     # Add diagonal arrow for magnitude and orientation
     # Arrow pointing from center to top-right (45 degrees)
     arrow_length = 100
     dx = arrow_length * np.cos(np.radians(45))
-    dy = -arrow_length * np.sin(np.radians(45))  # Negative because y-axis is inverted in images
+    dy = arrow_length * np.sin(np.radians(45))  # Negative because y-axis is inverted in images
     
     # Draw the arrow
     ax_legend.arrow(center, center, dx, dy, 
@@ -562,14 +562,14 @@ def visualize_multiple_blur_fields(tensor_list, image_path_list=None, output_pat
     # Position text at 45 degrees, slightly offset from the arrow
     mag_x = center + 0.5 * dx
     mag_y = center + 0.5 * dy
-    ax_legend.text(mag_x - 15, mag_y - 15, "Magnitude", ha='center', va='center', 
+    ax_legend.text(mag_x - 15, mag_y + 30, "Magnitude", ha='center', va='center', 
                   fontweight='bold', color='black', fontsize=12, rotation=45)
     
     # Add "Orientation" text curved around the edge
     # Position text near the edge at 45 degrees
     orient_x = center + 0.8 * dx
     orient_y = center + 0.8 * dy
-    ax_legend.text(orient_x + 50, orient_y - 50, "Orientation", ha='center', va='center', 
+    ax_legend.text(orient_x + 50, orient_y + 60, "Orientation", ha='center', va='center', 
                   fontweight='bold', color='black', fontsize=12, rotation=-45)
     
     ax_legend.axis('off')
