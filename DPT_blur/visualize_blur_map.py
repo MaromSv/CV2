@@ -5,6 +5,23 @@ import argparse
 import os
 import cv2 # Import OpenCV
 
+def derive_gt_path(original_image_path_from_pt_file):
+    try:
+        img_basename = os.path.basename(original_image_path_from_pt_file)
+        img_name_no_ext = os.path.splitext(img_basename)[0]
+        gt_npy_filename = img_name_no_ext + ".npy"
+        blur_dir = os.path.dirname(original_image_path_from_pt_file)
+        split_dir = os.path.dirname(blur_dir) # e.g., .../train/ or .../val/
+        if os.path.basename(blur_dir) != 'blur':
+            print(f"Warning: Expected 'blur' in path {original_image_path_from_pt_file} for GT derivation, found {os.path.basename(blur_dir)}.")
+            return None 
+        gt_condition_dir = os.path.join(split_dir, "condition")
+        gt_full_path = os.path.join(gt_condition_dir, gt_npy_filename)
+        return gt_full_path
+    except Exception as e:
+        print(f"Error deriving GT path from {original_image_path_from_pt_file}: {e}")
+        return None
+
 def visualize_blur_map(tensor_path, image_path=None, quiver_step=16, output_path=None):
     """Loads a saved blur vector (bx, by) tensor and visualizes its calculated magnitude, orientation, and the vector field itself, optionally superimposed on the original image."""
 
@@ -123,7 +140,7 @@ def plot_visualization_row(axes_row, cos_comp, sin_comp, mag_map, orientation_hs
     plt.gcf().colorbar(quiv, ax=axes_row[2], fraction=0.046, pad=0.04, label='Vector Magnitude')
 
 
-def visualize_blur_map(predicted_tensor_path, image_path_cli=None, quiver_step=16):
+def visualize_blur_map(predicted_tensor_path, image_path_cli=None, quiver_step=16, output_path=None):
     if not os.path.exists(predicted_tensor_path):
         print(f"Error: Predicted tensor file not found at {predicted_tensor_path}")
         return
@@ -196,7 +213,7 @@ def visualize_blur_map(predicted_tensor_path, image_path_cli=None, quiver_step=1
                            bx_quiver_pred, by_quiver_pred, original_image_for_display, 
                            quiver_step, H_pred, W_pred, "Pred")
 
-    plt.suptitle(f'Blur Vector Visualization ({os.path.basename(tensor_path)})', fontsize=16)
+    plt.suptitle(f'Blur Vector Visualization ({os.path.basename(predicted_tensor_path)})', fontsize=16)
     plt.tight_layout(rect=[0, 0.03, 1, 0.92]) # Adjusted rect to accommodate suptitle with subplots_adjust
     
     # Save to file if output_path is provided, otherwise show
@@ -206,15 +223,6 @@ def visualize_blur_map(predicted_tensor_path, image_path_cli=None, quiver_step=1
         plt.close()
     else:
         plt.show()
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Visualize predicted and GT blur maps.")
-    parser.add_argument('--input_file', type=str, required=True, help='Path to the saved PREDICTED blur data tensor (.pt file from inference).')
-    parser.add_argument('--image_path', type=str, default=None, help='Optional path to the original input image. Overrides path in .pt file.')
-    parser.add_argument('--step', type=int, default=16, help='Step size for quiver plot subsampling.')
-    args = parser.parse_args()
-
-    visualize_blur_map(args.input_file, image_path=args.image_path, quiver_step=args.step) 
 
 def create_color_wheel(size=200, with_labels=True, saturation=1.0):
     """Create a color wheel to visualize orientation and magnitude mapping."""
@@ -281,7 +289,15 @@ def visualize_blur_field_with_legend(tensor_path, image_path=None, output_path=N
     try:
         # Load the tensor
         blur_map_tensor = torch.load(tensor_path, map_location=torch.device('cpu'))
-        print(f"Loaded tensor from {tensor_path} with shape: {blur_map_tensor.shape}")
+        if isinstance(blur_map_tensor, dict):
+            # Try common keys
+            for key in ['blur_map_tensor', 'pred', 'prediction', 'output']:
+                if key in blur_map_tensor:
+                    blur_map_tensor = blur_map_tensor[key]
+                    break
+            else:
+                raise TypeError(f"Dict in .pt file does not contain a known tensor key: {list(blur_map_tensor.keys())}")
+        print(f"Loaded tensor from {tensor_path} with shape: {getattr(blur_map_tensor, 'shape', 'unknown')}")
         
         if not isinstance(blur_map_tensor, torch.Tensor):
             raise TypeError("Loaded object is not a torch.Tensor")
@@ -436,6 +452,14 @@ def visualize_blur_components(blur_data_path, image_path=None, output_path=None)
         blur_data = np.load(blur_data_path)
     elif blur_data_path.endswith('.pt'):
         blur_data = torch.load(blur_data_path, map_location=torch.device('cpu'))
+        if isinstance(blur_data, dict):
+            # Try common keys
+            for key in ['blur_map_tensor', 'pred', 'prediction', 'output']:
+                if key in blur_data:
+                    blur_data = blur_data[key]
+                    break
+            else:
+                raise TypeError(f"Dict in .pt file does not contain a known tensor key: {list(blur_data.keys())}")
         if isinstance(blur_data, torch.Tensor):
             blur_data = blur_data.detach().cpu().numpy()
         else:
@@ -782,7 +806,6 @@ def visualize_dataset_samples(dataset_path, output_dir="./visualizations", num_s
 # Add a command-line interface to make the file directly executable
 if __name__ == "__main__":
     import argparse
-    
     parser = argparse.ArgumentParser(description="Visualize blur fields from dataset or individual files")
     parser.add_argument("--dataset", type=str, help="Path to dataset directory with 'blur' and 'condition' subdirectories")
     parser.add_argument("--tensor_paths", nargs='+', help="Paths to individual tensor files (.pt or .npy)")
@@ -791,23 +814,20 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", type=int, default=5, help="Number of samples to visualize from dataset")
     parser.add_argument("--single_tensor", type=str, help="Path to a single tensor file to visualize with detailed components")
     parser.add_argument("--single_image", type=str, help="Path to corresponding image for single tensor visualization")
-    
+    parser.add_argument("--compare_pred_gt", nargs=2, metavar=('PRED_TENSOR', 'IMAGE_PATH'), help="Compare predicted blur map (.pt) with GT for the given image. Saves a 2x3 comparison plot.")
     args = parser.parse_args()
-    
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
-    
     if args.dataset:
-        # Visualize samples from dataset
         visualize_dataset_samples(args.dataset, args.output_dir, args.num_samples)
-    
     elif args.tensor_paths:
-        # Visualize multiple individual tensors
         tensor_list = []
         for tensor_path in args.tensor_paths:
             if tensor_path.endswith('.npy'):
+                import numpy as np
                 tensor = np.load(tensor_path)
             elif tensor_path.endswith('.pt'):
+                import torch
                 tensor = torch.load(tensor_path, map_location=torch.device('cpu'))
                 if isinstance(tensor, torch.Tensor):
                     tensor = tensor.detach().cpu().numpy()
@@ -815,25 +835,20 @@ if __name__ == "__main__":
                 print(f"Unsupported file format: {tensor_path}")
                 continue
             tensor_list.append(tensor)
-        
-        # Get corresponding image paths if provided
         image_path_list = args.image_paths if args.image_paths else None
-        
-        # Create visualization
         output_path = os.path.join(args.output_dir, "multiple_blur_fields.png")
         visualize_multiple_blur_fields(tensor_list, image_path_list, output_path)
-    
     elif args.single_tensor:
-        # Visualize a single tensor with detailed components
         if args.single_tensor.endswith('.npy') or args.single_tensor.endswith('.pt'):
             output_path = os.path.join(args.output_dir, "blur_components.png")
             visualize_blur_components(args.single_tensor, args.single_image, output_path)
-            
-            # Also create color wheel visualization
             color_output_path = os.path.join(args.output_dir, "blur_field_color.png")
             visualize_blur_field_with_legend(args.single_tensor, args.single_image, color_output_path)
         else:
             print(f"Unsupported file format: {args.single_tensor}")
-    
+    elif args.compare_pred_gt:
+        pred_tensor, image_path = args.compare_pred_gt
+        output_path = os.path.join(args.output_dir, "blur_comparison.png")
+        visualize_blur_map(predicted_tensor_path=pred_tensor, image_path_cli=image_path, quiver_step=20, output_path=output_path)
     else:
         parser.print_help()
