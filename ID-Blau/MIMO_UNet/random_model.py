@@ -195,7 +195,32 @@ def evaluate_random_model(args):
             total_psnr += psnr
 
         L = len(loader)
-        logging.info(f"{name} → Loss: {total_loss/L:.6f}, "
+        logging.info(f"{name} (w/ direction) → Loss: {total_loss/L:.6f}, "
+                     f"MSE: {total_mse/L:.6f}, PSNR: {total_psnr/L:.2f} dB")
+
+        total_loss = 0.0
+        total_mse  = 0.0
+        total_psnr = 0.0
+        model.eval()
+        for batch in tqdm(loader, desc=name):
+            img, gt = (batch['blur'], batch['blur_field']) if isinstance(batch, dict) else (batch[0], batch[1])
+            img, gt = img.to(device), gt.to(device)
+
+            # forward
+            outs = model(img)
+            loss, _ = criterion(outs, gt)
+
+            # MSE/PSNR on full-res
+            pred  = outs[-1]
+            mse   = ((pred[:, 2:3, :, :] - gt[:, 2:3, :, :])**2).mean().item()
+            psnr  = 10 * np.log10(1.0 / mse) if mse > 0 else 0.0
+
+            total_loss += loss.item()
+            total_mse  += mse
+            total_psnr += psnr
+
+        L = len(loader)
+        logging.info(f"{name} (w/o direction) → Loss: {total_loss/L:.6f}, "
                      f"MSE: {total_mse/L:.6f}, PSNR: {total_psnr/L:.2f} dB")
 
     # Evaluate validation, save grids, then test

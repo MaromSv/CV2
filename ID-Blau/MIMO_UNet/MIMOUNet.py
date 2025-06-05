@@ -154,8 +154,8 @@ class MIMOUNet(nn.Module):
         z = self.Decoder[0](z)
         out3 = self.feat_extract[3](z)      # [B, C3, H/4, W/4]
         tmp3 = self.ConvsOut[0](out3)       # [B,3,H/4,W/4]
-        dx3, dy3, m3 = tmp3[:,0:1], tmp3[:,1:2], tmp3[:,2:3]
-        outputs.append((dx3,dy3,m3))
+        tmp3[:, 2:3] = torch.sigmoid(tmp3[:, 2:3])
+        outputs.append(tmp3)
 
         # z = torch.cat([z, res2], dim=1)
         # z = self.Convs[0](z)
@@ -169,8 +169,8 @@ class MIMOUNet(nn.Module):
         z = self.Decoder[1](z)
         out2 = self.feat_extract[4](z)      # [B,C3,H/2,W/2]
         tmp2 = self.ConvsOut[1](out2)       # [B,3,H/2,W/2]
-        dx2, dy2, m2 = tmp2[:,0:1], tmp2[:,1:2], tmp2[:,2:3]
-        outputs.append((dx2,dy2,m2))
+        tmp2[:, 2:3] = torch.sigmoid(tmp2[:, 2:3])
+        outputs.append(tmp2)
 
         # z = torch.cat([z, res1], dim=1)
         # z = self.Convs[1](z)
@@ -182,8 +182,8 @@ class MIMOUNet(nn.Module):
         z = self.Convs[1](z)
         z = self.Decoder[2](z)
         tmp1 = self.feat_extract[5](z)      # [B,3,H,W]
-        dx1, dy1, m1 = tmp1[:,0:1], tmp1[:,1:2], tmp1[:,2:3]
-        outputs.append((dx1,dy1,m1))
+        tmp1[:, 2:3] = torch.sigmoid(tmp1[:, 2:3])
+        outputs.append(tmp1)
 
         return outputs
 
@@ -268,22 +268,28 @@ class MIMOUNetPlus(nn.Module):
         res2 = self.drop2(res2)
         res1 = self.drop1(res1)
 
+        # --- First output (lowest resolution) ---
         z = self.Decoder[0](z)
         z_ = self.ConvsOut[0](z)
-        z = self.feat_extract[3](z)
+        z_[:, 2:3] = torch.sigmoid(z_[:, 2:3])
         outputs.append(z_)
+        z = self.feat_extract[3](z)
 
+        # --- Second output (mid resolution) ---
         z = torch.cat([z, res2], dim=1)
         z = self.Convs[0](z)
         z = self.Decoder[1](z)
         z_ = self.ConvsOut[1](z)
-        z = self.feat_extract[4](z)
+        z_[:, 2:3] = torch.sigmoid(z_[:, 2:3])
         outputs.append(z_)
+        z = self.feat_extract[4](z)
 
+        # --- Final output (highest resolution) ---
         z = torch.cat([z, res1], dim=1)
         z = self.Convs[1](z)
         z = self.Decoder[2](z)
         z = self.feat_extract[5](z)
+        z[:, 2:3] = torch.sigmoid(z[:, 2:3])
         outputs.append(z)
 
         return outputs
@@ -348,7 +354,9 @@ class UNet(nn.Module):
         d1 = self.up1(d2)
         d1 = self.dec1(torch.cat([d1, e1], dim=1))
 
-        return self.out(d1)  # [B, out_channels, H, W]
+        out = self.out(d1)  # [B, out_channels, H, W]
+        out[:, 2:3] = torch.sigmoid(out[:, 2:3])
+        return out
 
 
 def build_MIMOUnet_net(model_name):

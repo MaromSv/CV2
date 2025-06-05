@@ -16,6 +16,7 @@ import matplotlib.image as mpimg
 from PIL import Image
 import math  # Add this import for math.log10
 from tqdm import tqdm
+import seaborn as sns
 
 # Add grandparent directory to path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))  # MIMO_UNet directory
@@ -59,6 +60,97 @@ def stop_timer(name):
         del _timer_dict[name]
     else:
         print(f"[TIMER] No timer found for '{name}'")
+
+def compute_violin_data(input_img, blur_field, pred_field, dir_loss):
+    r = input_img[0].flatten().cpu().numpy()
+    g = input_img[1].flatten().cpu().numpy()
+    b = input_img[2].flatten().cpu().numpy()
+
+    dx_gt = blur_field[0].flatten().cpu().numpy()
+    dy_gt = blur_field[1].flatten().cpu().numpy()
+    mag_gt = blur_field[2].flatten().cpu().numpy()
+    angle_gt = np.arctan2(dy_gt, dx_gt) * 180 / np.pi
+    angle_gt = (angle_gt + 360) % 360
+
+    dx_pred = pred_field[0].flatten().cpu().numpy()
+    dy_pred = pred_field[1].flatten().cpu().numpy()
+    mag_pred = pred_field[2].flatten().cpu().numpy()
+    angle_pred = np.arctan2(dy_pred, dx_pred) * 180 / np.pi
+    angle_pred = (angle_pred + 360) % 360
+
+    dir_loss = dir_loss.flatten().cpu().numpy()
+
+    return {
+        'Input': {'R': r, 'G': g, 'B': b},
+
+        'Ground Truth (bounded)': {
+            'dx': dx_gt,
+            'dy': dy_gt,
+            'mag': mag_gt,
+            'angle': angle_gt
+        },
+        'Prediction (bounded)': {
+            'dx': dx_pred,
+            'dy': dy_pred,
+            'mag': mag_pred,
+            'angle': angle_pred
+        },
+
+        'Ground Truth (unbounded)': {
+            'dx': dx_gt,
+            'dy': dy_gt,
+            'mag': mag_gt,
+            'angle': angle_gt
+        },
+        'Prediction (unbounded)': {
+            'dx': dx_pred,
+            'dy': dy_pred,
+            'mag': mag_pred,
+            'angle': angle_pred
+        },
+
+        'Dir loss': dir_loss
+    }
+
+def plot_violin_grid(data_dict, sample_index, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    rows = ['Input', 'Ground Truth (bounded)', 'Prediction (bounded)', 'Ground Truth (unbounded)', 'Prediction (unbounded)']
+    num_cols = max(len(data_dict[r]) for r in rows) 
+    fig, axs = plt.subplots(len(rows), num_cols, figsize=(4*num_cols, 5*len(rows)))
+    
+    for i, row in enumerate(rows):
+
+        if row == 'Input':
+            sns.violinplot(y=data_dict['Dir loss'], ax=axs[i][3], inner='box')
+            axs[i][3].set_title('Dir loss')
+            axs[i][3].set_ylabel('')
+            axs[i][3].grid(True)
+            axs[i][3].set_ylim([-0.1, 2.1])
+
+        for j, (key, values) in enumerate(data_dict[row].items()):
+            sns.violinplot(y=values, ax=axs[i][j], inner='box')
+            axs[i][j].set_title(f'{row} - {key}')
+            axs[i][j].set_ylabel('')
+            axs[i][j].grid(True)
+
+            # Apply consistent bounds only to the bounded prediction row
+            if row == 'Prediction (bounded)' or row == 'Ground Truth (bounded)':
+                if key in ['dx', 'dy']:
+                    axs[i][j].set_ylim([-1.1, 1.1])
+                elif key == 'mag':
+                    axs[i][j].set_ylim([-1.1, 1.1])
+                elif key == 'angle':
+                    axs[i][j].set_ylim([0, 365])
+
+            if row == 'Input':
+                axs[i][j].set_ylim([-0.6, 0.6])
+    
+    plt.tight_layout()
+    path = os.path.join(output_dir, f'sample_{sample_index}_violin.png')
+    plt.savefig(path, dpi=300)
+    plt.close()
+    return path
+
 
 def visualize_dataset_samples(dataset, output_dir, split, num_samples=5):
     """
@@ -230,7 +322,7 @@ def visualize_dataset_samples(dataset, output_dir, split, num_samples=5):
             import traceback
             traceback.print_exc()
 
-def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
+def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device, args):
     """
     Save a grid visualization of model predictions for fixed validation samples
     
@@ -356,14 +448,19 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             logging.info(f"Prediction shape: {pred.shape}")
 
             # Angles in (min, max, mean, median)
-            input_angle = ((torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).min().item(), (torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).max().item(), (torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).mean().item(), (torch.atan2(blur_img[0,1], blur_img[0,0]) * 180 / np.pi).median().item())
             gt_angle = ((torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).min().item(), (torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).max().item(), (torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).mean().item(), (torch.atan2(blur_field[0,1], blur_field[0,0]) * 180 / np.pi).median().item())
             pred_angle = ((torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).min().item(), (torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).max().item(), (torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).mean().item(), (torch.atan2(pred[0,1], pred[0,0]) * 180 / np.pi).median().item())
 
-            logging.info(f"Sample {i} - Input image range: ({blur_img[0,0].min().item():.4f}, {blur_img[0,1].min().item():.4f}, {blur_img[0,2].min().item():.4f}), ({blur_img[0,0].max().item():.4f}, {blur_img[0,1].max().item():.4f}, {blur_img[0,2].max().item():.4f}), angle: {input_angle}")
+            # Mag in (min, max, mean, median)
+            gt_mag = (blur_field[0,2].min().item(), blur_field[0,2].max().item(), blur_field[0,2].mean().item(), blur_field[0,2].median().item())
+            pred_mag = (pred[0,2].min().item(), pred[0,2].max().item(), pred[0,2].mean().item(), pred[0,2].median().item())
+
+            # Printing (bx_min, by_min, mag_min), (bx_max, by_max, mag_max), angle: (min, max, mean, median), mag: (min, max, mean, median)
+            logging.info(f"Sample {i} - Input image range: ({blur_img[0,0].min().item():.4f}, {blur_img[0,1].min().item():.4f}, {blur_img[0,2].min().item():.4f}), ({blur_img[0,0].max().item():.4f}, {blur_img[0,1].max().item():.4f}, {blur_img[0,2].max().item():.4f}), mag: {gt_mag}")
             logging.info(f"Sample {i} - Ground truth blur field range: ({blur_field[0,0].min().item():.4f}, {blur_field[0,1].min().item():.4f}, {blur_field[0,2].min().item():.4f}), ({blur_field[0,0].max().item():.4f}, {blur_field[0,1].max().item():.4f}, {blur_field[0,2].max().item():.4f}), angle: {gt_angle}")
-            logging.info(f"Sample {i} - Predicted blur field range: ({pred[0,0].min().item():.4f}, {pred[0,1].min().item():.4f}, {pred[0,2].min().item():.4f}), ({pred[0,0].max().item():.4f}, {pred[0,1].max().item():.4f}, {pred[0,2].max().item():.4f}), angle: {pred_angle}")
+            logging.info(f"Sample {i} - Predicted blur field range: ({pred[0,0].min().item():.4f}, {pred[0,1].min().item():.4f}, {pred[0,2].min().item():.4f}), ({pred[0,0].max().item():.4f}, {pred[0,1].max().item():.4f}, {pred[0,2].max().item():.4f}), angle: {pred_angle}, mag: {pred_mag}")
             
+
             # Save prediction tensor
             pred_tensor_path = os.path.join(epoch_dir, f'sample_{i}_pred.pt')
             torch.save(pred[0].cpu(), pred_tensor_path)
@@ -375,9 +472,11 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             gt_tensor_path = os.path.join(epoch_dir, f'sample_{i}_gt.pt')
             torch.save(blur_field[0].cpu(), gt_tensor_path)
 
-            # --- BEGIN: Per-image loss bar plot ---
-            # Use the same loss formulas as in BlurFieldLoss, but unweighted
-            
+                        # --- BEGIN: Per-image loss bar plot ---
+            # Define loss instances once
+            charbonnier = CharbonnierLoss()
+            mse = nn.MSELoss()
+
             # pred[0] is [1, 3, H, W], blur_field[0] is [3, H, W] or [1, 3, H, W]
             pred_tensor = pred[0] if isinstance(pred, tuple) else pred
             if pred_tensor.dim() == 3:
@@ -386,39 +485,97 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
             if target_tensor.dim() == 3:
                 target_tensor = target_tensor.unsqueeze(0)
 
-            pred_bx, pred_by = pred_tensor[:, 0:1], pred_tensor[:, 1:2]
-            pred_mag = pred_tensor[:, 2:3]
-            target_bx, target_by = target_tensor[:, 0:1], target_tensor[:, 1:2]
-            target_mag = target_tensor[:, 2:3]
+            pred_bx, pred_by = pred_tensor[:, 0:1, :, :], pred_tensor[:, 1:2, :, :]
+            pred_mag = pred_tensor[:, 2:3, :, :]
 
-            pred_vec = torch.cat([pred_bx, pred_by], dim=1)
-            target_vec = torch.cat([target_bx, target_by], dim=1)
-            pred_norm = torch.norm(pred_vec, p=2, dim=1, keepdim=True) + 1e-8
-            target_norm = torch.norm(target_vec, p=2, dim=1, keepdim=True) + 1e-8
-            pred_normalized = pred_vec / pred_norm
-            target_normalized = target_vec / target_norm
+            target_bx, target_by = target_tensor[:, 0:1, :, :], target_tensor[:, 1:2, :, :]
+            target_mag = target_tensor[:, 2:3, :, :]
+
+            pred_vectors = torch.cat([pred_bx, pred_by], dim=1)
+            target_vectors = torch.cat([target_bx, target_by], dim=1)
+
+            pred_norm = torch.norm(pred_vectors, p=2, dim=1, keepdim=True) + 1e-8
+            target_norm = torch.norm(target_vectors, p=2, dim=1, keepdim=True) + 1e-8
+
+            pred_normalized = pred_vectors / pred_norm
+            target_normalized = target_vectors / target_norm
+
             cos_sim = (pred_normalized * target_normalized).sum(dim=1, keepdim=True)
-            dir_loss = (1 - cos_sim).mean().item()
+            dir_loss = (1 - cos_sim).mean()
+            
+            if args.is_dir:
+                # Magnitude loss
+                mag_loss = charbonnier(pred_mag, target_mag)
 
-            charbonnier = CharbonnierLoss()
-            mag_loss = charbonnier(pred_mag, target_mag).item()
-            mse_loss = F.mse_loss(pred_tensor, target_tensor).item()
-            charbonnier_loss = charbonnier(pred_tensor, target_tensor).item()
+                if args.loss_mode == 'per_image_mse':
+                    error = (pred_tensor - target_tensor) ** 2
+                    image_error = error.view(error.shape[0], -1).mean(dim=1)
+                    logging.info(f"Sample {i} - Per-image image_error: {image_error.mean() / 2}")
+                    mse_loss = image_error.mean() / 2
+                    logging.info(f"Sample {i} - Per-image mse_loss: {mse_loss}")
+                else:
+                    mse_loss = mse(pred_tensor, target_tensor)
 
-            bar_names = ['dir_loss', 'mag_loss', 'mse_loss', 'CharbonnierLoss']
-            bar_values = [dir_loss, mag_loss, mse_loss, charbonnier_loss]
-            plt.figure(figsize=(6, 4))
-            bars = plt.bar(bar_names, bar_values, color=['blue', 'orange', 'green', 'red'])
+                charbonnier_loss = charbonnier(pred_tensor, target_tensor)
+
+                total_loss = dir_loss + mag_loss + mse_loss + charbonnier_loss
+                total_loss_comb = args.lambda_dir * dir_loss + args.lambda_mag * mag_loss + args.lambda_mse * mse_loss + args.lambda_l1 * charbonnier_loss
+            else:
+                if args.loss_mode == 'per_image_mse':
+                    error = (pred_mag - target_mag) ** 2
+                    image_error = error.view(error.shape[0], -1).mean(dim=1)
+                    mse_loss = image_error.mean() / 2
+                else:
+                    mse_loss = mse(pred_mag, target_mag)
+
+                charbonnier_loss = charbonnier(pred_mag, target_mag)
+
+                dir_loss = torch.tensor(0.0, device=pred_tensor.device)
+                mag_loss = torch.tensor(0.0, device=pred_tensor.device)
+
+                total_loss = mse_loss + charbonnier_loss
+                total_loss_comb = args.lambda_mse * mse_loss + args.lambda_l1 * charbonnier_loss
+
+            # --- Bar plot ---
+            logging.info(f"Sample {i} - dir_loss: {dir_loss}, mag_loss: {mag_loss}, mse_loss: {mse_loss}, CharbonnierLoss: {charbonnier_loss}, total_loss: {total_loss}, total_loss_comb: {total_loss_comb}")
+            bar_names = ['dir_loss', 'mag_loss', 'mse_loss', 'CharbonnierLoss', 'total_loss', 'total_loss_comb']
+            bar_values = [dir_loss, mag_loss, mse_loss, charbonnier_loss, total_loss, total_loss_comb]
+            lambda_weights = [args.lambda_dir, args.lambda_mag, args.lambda_mse, args.lambda_l1, 1, 1]
+
+            weighted_values = [v * w for v, w in zip(bar_values, lambda_weights)]
+            x = np.arange(len(bar_names))
+            width = 0.35
+
+            plt.figure(figsize=(8, 4))
+            bars1 = plt.bar(x - width/2, [v.item() for v in bar_values], width, label='Unweighted', color='lightgray')
+            bars2 = plt.bar(x + width/2, [v.item() for v in weighted_values], width, label='Weighted', color='skyblue')
+
             plt.ylabel('Loss Value')
             plt.title(f'Sample {i} Loss Breakdown')
-            for bar, val in zip(bars, bar_values):
-                plt.text(bar.get_x() + bar.get_width() / 2, val, f'{val:.4f}', ha='center', va='bottom')
+            plt.xticks(x, bar_names, rotation=15)
+            plt.legend()
+
+            for bar, val in zip(bars1, bar_values):
+                plt.text(bar.get_x() + bar.get_width()/2, val.item(), f'{val.item():.4f}', ha='center', va='bottom', fontsize=8)
+            for bar, val in zip(bars2, weighted_values):
+                plt.text(bar.get_x() + bar.get_width()/2, val.item(), f'{val.item():.4f}', ha='center', va='bottom', fontsize=8)
+
             plt.tight_layout()
             bar_path = os.path.join(epoch_dir, f'sample_{i}_loss_bar.png')
             bar_paths.append(bar_path)
             plt.savefig(bar_path, dpi=200)
             plt.close()
             print(f"Saved loss bar plot to {bar_path}")
+            
+            # Create violin plot for the loss
+            violin_data = compute_violin_data(
+                blur_img[0].cpu(),
+                blur_field[0].cpu(),
+                pred[0].cpu(),
+                (1 - cos_sim).cpu()
+            )
+            violin_path = plot_violin_grid(violin_data, i, epoch_dir)
+            logging.info(f"Saved violin plot to {violin_path}")
             # --- END: Per-image loss bar plot ---
 
     # --- BEGIN: Combine bar plots into grid ---
@@ -455,6 +612,13 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device):
     except Exception as e:
         print(f"Error creating grid visualizations: {e}")
     
+    # Delete pt files
+    for i in range(len(pred_tensors)):
+        os.remove(os.path.join(epoch_dir, f'sample_{i}_pred.pt'))
+        os.remove(os.path.join(epoch_dir, f'sample_{i}_gt.pt'))
+        os.remove(os.path.join(epoch_dir, f'sample_{i}_blur.png'))
+        os.remove(os.path.join(epoch_dir, f'sample_{i}_loss_bar.png'))
+
     # Set model back to training mode
     model.train()
     
@@ -528,6 +692,76 @@ def analyze_dataset_statistics(dataset, name="dataset"):
     
     return stats
 
+def save_loss_plots(args, epochs_list, train_losses, val_losses, val_psnrs, val_mses):
+    # Generate and save plots
+    logging.info("Generating training metrics plots...")
+    plots_dir = os.path.join(args.output_dir, 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    # Plot losses
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs_list, train_losses, 'b-', label='Training Loss')
+    plt.plot(epochs_list, val_losses, 'r-', label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(os.path.join(plots_dir, 'loss_plot.png'), dpi=300)
+    plt.close()
+    
+    # Plot PSNR
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs_list, val_psnrs, 'g-')
+    plt.xlabel('Epoch')
+    plt.ylabel('PSNR (dB)')
+    plt.title('Validation PSNR')
+    plt.grid(True)
+    plt.savefig(os.path.join(plots_dir, 'psnr_plot.png'), dpi=300)
+    plt.close()
+    
+    # Plot MSE
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs_list, val_mses, 'm-')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE')
+    plt.title('Validation MSE')
+    plt.grid(True)
+    plt.savefig(os.path.join(plots_dir, 'mse_plot.png'), dpi=300)
+    plt.close()
+    
+    # Combined plot with all metrics
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 3, 1)
+    plt.plot(epochs_list, train_losses, 'b-', label='Training Loss')
+    plt.plot(epochs_list, val_losses, 'r-', label='Validation Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.legend()
+    plt.grid(True)
+    
+    plt.subplot(1, 3, 2)
+    plt.plot(epochs_list, val_psnrs, 'g-')
+    plt.xlabel('Epoch')
+    plt.ylabel('PSNR (dB)')
+    plt.title('Validation PSNR')
+    plt.grid(True)
+    
+    plt.subplot(1, 3, 3)
+    plt.plot(epochs_list, val_mses, 'm-')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE')
+    plt.title('Validation MSE')
+    plt.grid(True)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, 'training_metrics.png'), dpi=300)
+    plt.close()
+    
+    logging.info(f"Training metrics plots saved to {plots_dir}")
+
 def train_model(args):
     """Main training function."""
     # Set up logging
@@ -545,6 +779,9 @@ def train_model(args):
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logging.info(f"Using device: {device}")
+
+    # Print args
+    logging.info(f"Args: {args}")
     
     # Set up TensorBoard
     writer = SummaryWriter(log_dir=os.path.join(args.output_dir, 'tensorboard'))
@@ -754,13 +991,14 @@ def train_model(args):
         lambda_mag=args.lambda_mag,
         lambda_mse=args.lambda_mse,
         lambda_l1=args.lambda_l1,
-        is_dir=args.is_dir
+        is_dir=args.is_dir,
+        mode=args.loss_mode
     )
     criterion = MultiScaleBlurFieldLoss(
         base_criterion=base_loss,
         scale_weights=[0.25, 0.5, 1.0],     # head-wise weights: low, mid, full
         use_consistency=True,               # optional up/down consistency
-        consistency_weight=0.2
+        consistency_weight=args.consistency_weight
     )
     
     # --- Warmup for scale_weights ---
@@ -794,6 +1032,7 @@ def train_model(args):
 
     
     for epoch in range(args.epochs):
+        mse = nn.MSELoss()
         start_timer(f"epoch_{epoch+1}")
         # Compute warmup factor and update scale weights
         warmup_factor = min(1.0, epoch / warmup_epochs)
@@ -804,6 +1043,14 @@ def train_model(args):
         criterion.update_scale_weights(new_weights)
         logging.info(f"Using multi-scale blur field loss: {new_weights}")
         
+        # Save validation grid visualization
+        if epoch % args.save_freq == 0:
+            logging.info(f"Creating validation grid visualization for epoch {epoch}...")
+            start_timer(f"save_validation_grid_{epoch}")
+            grid_path = save_validation_grid(model, fixed_val_loader, epoch, args.output_dir, device, args)
+            stop_timer(f"save_validation_grid_{epoch}")
+            logging.info(f"Saved validation grid to {grid_path}")
+
         # Training phase
         start_timer(f"\ttrain_{epoch+1}")
         model.train()
@@ -892,9 +1139,16 @@ def train_model(args):
                 if isinstance(pred, tuple):
                     pred = torch.cat([pred[0], pred[1], pred[2]], dim=1)
                 
-                mse = torch.mean((pred - blur_field) ** 2)
-                val_mse += mse.item()  # Track MSE
-                val_psnr += 10 * torch.log10(1.0 / mse).item()
+                mse_tmp = 0.0
+                if args.is_dir:
+                    mse_tmp = mse(pred, blur_field)
+                else:
+                    pred_mag = pred[:, 2:3, :, :]
+                    blur_mag = blur_field[:, 2:3, :, :]
+                    mse_tmp = mse(pred_mag, blur_mag)
+
+                val_mse += mse_tmp.item()  # Track MSE
+                val_psnr += 10 * torch.log10(1.0 / mse_tmp).item()
         stop_timer(f"\tval_{epoch+1}")
         
         # Calculate average validation metrics
@@ -957,29 +1211,13 @@ def train_model(args):
             }
             torch.save(checkpoint, os.path.join(args.output_dir, 'checkpoints', f'checkpoint_epoch_{epoch}.pth'))
             
-            # Save validation grid visualization
-            logging.info(f"Creating validation grid visualization for epoch {epoch}...")
-            start_timer(f"save_validation_grid_{epoch}")
-            grid_path = save_validation_grid(model, fixed_val_loader, epoch, args.output_dir, device)
-            stop_timer(f"save_validation_grid_{epoch}")
-            logging.info(f"Saved validation grid to {grid_path}")
-    
-    # Final validation grid visualization
-    logging.info(f"Creating final validation grid visualization...")
-    grid_path = save_validation_grid(model, fixed_val_loader, len(epochs_list), args.output_dir, device)
-    logging.info(f"Saved final validation grid to {grid_path}")
-    
-    # Load best model for final evaluation
-    best_checkpoint = torch.load(os.path.join(args.output_dir, 'checkpoints', 'best_model.pth'))
-    model.load_state_dict(best_checkpoint['model_state_dict'])
-    # If you re-enable the scheduler, you may want to restore its state here
-    logging.info(f"Loaded best model from epoch {best_checkpoint['epoch']+1} with validation loss: {best_checkpoint['best_val_loss']:.4f}")
-    
-    # Final validation grid visualization with best model
-    logging.info(f"Creating validation grid visualization with best model...")
-    grid_path = save_validation_grid(model, fixed_val_loader, 'best', args.output_dir, device)
-    logging.info(f"Saved best model validation grid to {grid_path}")
-    
+
+        # Save loss plots
+        if epoch % int(args.save_freq / 2) == 0:
+            save_loss_plots(args, epochs_list, train_losses, val_losses, val_psnrs, val_mses)
+
+    save_loss_plots(args, epochs_list, train_losses, val_losses, val_psnrs, val_mses)
+
     # Evaluate on test set
     logging.info("Evaluating best model on test set...")
     model.eval()
@@ -1027,11 +1265,17 @@ def train_model(args):
             if isinstance(pred, tuple):
                 pred = torch.cat([pred[0], pred[1], pred[2]], dim=1)
             
-            mse = F.mse_loss(pred, blur_field).item()
-            test_mse += mse
+            mse_tmp = 0.0
+            if args.is_dir:
+                mse_tmp = mse(pred, blur_field).item()
+            else:
+                pred_mag = pred[:, 2:3, :, :]
+                blur_mag = blur_field[:, 2:3, :, :]
+                mse_tmp = mse(pred_mag, blur_mag).item()
+            test_mse += mse_tmp
             
             # Calculate PSNR
-            psnr = -10 * math.log10(mse) if mse > 0 else 100
+            psnr = -10 * math.log10(mse_tmp) if mse_tmp > 0 else 100
             test_psnr += psnr
             
     # Calculate average test metrics
@@ -1047,75 +1291,22 @@ def train_model(args):
 
     # Close TensorBoard writer
     writer.close()
+
+    # Final validation grid visualization
+    logging.info(f"Creating final validation grid visualization...")
+    grid_path = save_validation_grid(model, fixed_val_loader, len(epochs_list), args.output_dir, device, args)
+    logging.info(f"Saved final validation grid to {grid_path}")
     
-    # Generate and save plots
-    logging.info("Generating training metrics plots...")
-    plots_dir = os.path.join(args.output_dir, 'plots')
-    os.makedirs(plots_dir, exist_ok=True)
+    # Load best model for final evaluation
+    best_checkpoint = torch.load(os.path.join(args.output_dir, 'checkpoints', 'best_model.pth'))
+    model.load_state_dict(best_checkpoint['model_state_dict'])
+    # If you re-enable the scheduler, you may want to restore its state here
+    logging.info(f"Loaded best model from epoch {best_checkpoint['epoch']+1} with validation loss: {best_checkpoint['best_val_loss']:.4f}")
     
-    # Plot losses
-    plt.figure(figsize=(10, 6))
-    plt.plot(epochs_list, train_losses, 'b-', label='Training Loss')
-    plt.plot(epochs_list, val_losses, 'r-', label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(os.path.join(plots_dir, 'loss_plot.png'), dpi=300)
-    plt.close()
-    
-    # Plot PSNR
-    plt.figure(figsize=(10, 6))
-    plt.plot(epochs_list, val_psnrs, 'g-')
-    plt.xlabel('Epoch')
-    plt.ylabel('PSNR (dB)')
-    plt.title('Validation PSNR')
-    plt.grid(True)
-    plt.savefig(os.path.join(plots_dir, 'psnr_plot.png'), dpi=300)
-    plt.close()
-    
-    # Plot MSE
-    plt.figure(figsize=(10, 6))
-    plt.plot(epochs_list, val_mses, 'm-')
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE')
-    plt.title('Validation MSE')
-    plt.grid(True)
-    plt.savefig(os.path.join(plots_dir, 'mse_plot.png'), dpi=300)
-    plt.close()
-    
-    # Combined plot with all metrics
-    plt.figure(figsize=(15, 5))
-    
-    plt.subplot(1, 3, 1)
-    plt.plot(epochs_list, train_losses, 'b-', label='Training Loss')
-    plt.plot(epochs_list, val_losses, 'r-', label='Validation Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss')
-    plt.legend()
-    plt.grid(True)
-    
-    plt.subplot(1, 3, 2)
-    plt.plot(epochs_list, val_psnrs, 'g-')
-    plt.xlabel('Epoch')
-    plt.ylabel('PSNR (dB)')
-    plt.title('Validation PSNR')
-    plt.grid(True)
-    
-    plt.subplot(1, 3, 3)
-    plt.plot(epochs_list, val_mses, 'm-')
-    plt.xlabel('Epoch')
-    plt.ylabel('MSE')
-    plt.title('Validation MSE')
-    plt.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig(os.path.join(plots_dir, 'training_metrics.png'), dpi=300)
-    plt.close()
-    
-    logging.info(f"Training metrics plots saved to {plots_dir}")
+    # Final validation grid visualization with best model
+    logging.info(f"Creating validation grid visualization with best model...")
+    grid_path = save_validation_grid(model, fixed_val_loader, 'best', args.output_dir, device, args)
+    logging.info(f"Saved best model validation grid to {grid_path}")
     
     return model
 
@@ -1151,10 +1342,25 @@ def parse_args():
     parser.add_argument('--lambda_l1', type=float, default=1.0, help='Weight for l1 loss')
     parser.add_argument('--lambda_mse', type=float, default=1.0, help='Weight for mse loss')
     parser.add_argument('--is_dir', action='store_true', default=False, help='If using direction loss')
+    parser.add_argument('--loss_mode', type=str, default='default', help='Loss mode: default, per_image_mse')
+    parser.add_argument('--consistency_weight', type=float, default=0.2, help='Weight for consistency loss')
+
     
     return parser.parse_args()
 
 if __name__ == '__main__':
     args = parse_args()
     train_model(args)
+
+    # Delete pt files from gt folder inside validation_samples folder
+    gt_folder = os.path.join(args.output_dir, 'validation_samples', 'gt')
+    for file in os.listdir(gt_folder):
+        if file.endswith('.pt'):
+            os.remove(os.path.join(gt_folder, file))
+
+    # Delete checkpoints except best_model.pth
+    checkpoints_folder = os.path.join(args.output_dir, 'checkpoints')
+    for file in os.listdir(checkpoints_folder):
+        if file.endswith('.pth') and file != 'best_model.pth':
+            os.remove(os.path.join(checkpoints_folder, file))
     

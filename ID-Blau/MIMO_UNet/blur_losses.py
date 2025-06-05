@@ -9,7 +9,7 @@ class BlurFieldLoss(nn.Module):
     - Cosine similarity loss for direction accuracy
     - Magnitude loss for blur strength accuracy
     """
-    def __init__(self, lambda_dir=0.5, lambda_mag=0.5, lambda_l1=0.5, lambda_mse=0.5, is_dir=False):
+    def __init__(self, lambda_dir=0.5, lambda_mag=0.5, lambda_l1=0.5, lambda_mse=0.5, is_dir=False, mode="default"):
         super(BlurFieldLoss, self).__init__()
         self.lambda_dir = lambda_dir
         self.lambda_mag = lambda_mag
@@ -18,6 +18,7 @@ class BlurFieldLoss(nn.Module):
         self.charbonnier = CharbonnierLoss()
         self.mse_loss = nn.MSELoss()
         self.is_dir = is_dir
+        self.mode = mode
         
     def forward(self, pred, target):
         # Extract components
@@ -46,14 +47,27 @@ class BlurFieldLoss(nn.Module):
             # Magnitude loss
             mag_loss = self.charbonnier(pred_mag, target_mag)
 
-            mse = self.mse_loss(pred, target)
+            if self.mode == 'per_image_mse':
+                # ✨ ABC-FuseNet style: average the squared error **per image**
+                error = (pred - target) ** 2  # [B, 3, H, W]
+                image_error = error.view(error.shape[0], -1).mean(dim=1)  # [B]
+                mse = image_error.mean() / 2  # divide by 2N in the paper, but we assume batch = N
+            else:
+                mse = self.mse_loss(pred, target)  # standard MSE
+                
             l1 = self.charbonnier(pred, target)
             
             # Combined loss
             total_loss = self.lambda_dir * dir_loss + self.lambda_mag * mag_loss + self.lambda_l1 * l1 + self.lambda_mse * mse
         else:
             # MSE loss for magnitude only
-            mse = self.mse_loss(pred_mag, target_mag)
+            if self.mode == 'per_image_mse':
+                error = (pred_mag - target_mag) ** 2
+                image_error = error.view(error.shape[0], -1).mean(dim=1)
+                mse = image_error.mean() / 2
+            else:
+                mse = self.mse_loss(pred_mag, target_mag)
+                
             l1 = self.charbonnier(pred_mag, target_mag)
             
             # combine mse and l1
