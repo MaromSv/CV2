@@ -23,7 +23,35 @@ except ImportError:
 
 def _create_blur_head(head_type, features, output_channels):
     """Helper function to create different blur head architectures."""
-    if head_type == "original_blur_head":
+    if head_type == "enhanced_blur_head":
+        print(f"Using 'enhanced_blur_head' ({features=}, {output_channels=})")
+        return nn.Sequential(
+            # Initial feature reduction
+            nn.Conv2d(features, features // 2, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(features // 2),
+            nn.ReLU(True),
+            
+            # First residual block
+            ResidualBlock(features // 2),
+            
+            # Feature refinement
+            nn.Conv2d(features // 2, 64, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(True),
+            
+            # Second residual block
+            ResidualBlock(64),
+            
+            # Final refinement
+            nn.Conv2d(64, 32, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(True),
+            
+            # Output layer with residual connection
+            nn.Conv2d(32, output_channels, kernel_size=1, stride=1, padding=0, bias=True),
+            Interpolate(scale_factor=2, mode="bilinear", align_corners=True)
+        )
+    elif head_type == "original_blur_head":
         print(f"Using 'original_blur_head' ({features=}, {output_channels=})")
         return nn.Sequential(
             nn.Conv2d(features, features // 2, kernel_size=3, stride=1, padding=1, bias=False),
@@ -63,7 +91,7 @@ def _create_blur_head(head_type, features, output_channels):
             Interpolate(scale_factor=2, mode="bilinear", align_corners=True)
         )
     else:
-        raise ValueError(f"Unsupported blur_head_type: {head_type}. Choose 'original_blur_head', 'lightweight_blur_head', or 'medium_blur_head'.")
+        raise ValueError(f"Unsupported blur_head_type: {head_type}. Choose 'enhanced_blur_head', 'original_blur_head', 'lightweight_blur_head', or 'medium_blur_head'.")
 
 
 def create_dpt_blur_model(output_channels=3, model_type="dpt_hybrid", blur_head_type="original_blur_head", 
@@ -150,6 +178,27 @@ def create_dpt_blur_model(output_channels=3, model_type="dpt_hybrid", blur_head_
 
 
     return model
+
+class ResidualBlock(nn.Module):
+    """Residual block with two convolutions and a skip connection."""
+    def __init__(self, channels):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.relu1 = nn.ReLU(True)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(channels)
+        
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu1(out)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out += residual
+        out = F.relu(out)
+        return out
 
 if __name__ == '__main__':
     print("Testing model_utils.py...")
