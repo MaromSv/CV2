@@ -502,6 +502,12 @@ def save_validation_grid(model, fixed_val_loader, epoch, output_dir, device, arg
 
             cos_sim = (pred_normalized * target_normalized).sum(dim=1, keepdim=True)
             dir_loss = (1 - cos_sim).mean()
+
+            logging.info(f"Sample {i} - dir_loss: {dir_loss}")
+            
+            max_dir_loss = (1 - cos_sim).max().item()
+            min_dir_loss = (1 - cos_sim).min().item()
+            print(f"Per-pixel dir loss: min={min_dir_loss:.4f}, max={max_dir_loss:.4f}")
             
             if args.is_dir:
                 # Magnitude loss

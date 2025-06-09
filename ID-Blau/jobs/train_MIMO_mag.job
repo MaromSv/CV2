@@ -1,0 +1,44 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=5_new_mimo
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=24:00:00
+#SBATCH --output=outputs/mag_only/mimo_5_new.out
+
+cd ~/code/ID-Blau
+
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+conda activate IDBlau
+
+# Create a directory for the experiment
+mkdir -p MIMO_UNet/mag_only/blur_field5_new
+
+# Train MIMO-UNet with 10,000 instances
+python MIMO_UNet/train_blur_field.py \
+    --train_dir ../../../../../scratch-shared/scur0698/big_dataset_formatted/train \
+    --val_dir ../../../../../scratch-shared/scur0698/big_dataset_formatted/val \
+    --output_dir MIMO_UNet/mag_only/blur_field5_new \
+    --batch_size 32 \
+    --epochs 150 \
+    --lr 1e-5 \
+    --crop_size 256 \
+    --base_channels 64 \
+    --lambda_dir 0.0 \
+    --lambda_mag 0.0 \
+    --lambda_mse 0.0 \
+    --lambda_l1 1.0 \
+    --max_train_samples 100000 \
+    --max_val_samples 1000000 \
+    --num_workers 16 \
+    --save_freq 10 \
+    --patience 20 \
+    --model_name "MIMO-UNetPlus" \
+    # --is_dir \  
+    # --loss_mode "per_image_mse" \
+
+echo "Training completed!"

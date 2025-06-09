@@ -1,0 +1,26 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=vis_mimo_mag
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=16
+#SBATCH --time=00:10:00
+#SBATCH --output=outputs/report/vis_mimo_mag.out
+
+cd ~/code/ID-Blau
+
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+conda activate IDBlau
+
+mkdir -p MIMO_UNet/report/MIMO_mag
+
+python MIMO_UNet/vis_report.py \
+    --val_dir ../../../../../scratch-shared/scur0698/big_dataset_formatted/val \
+    --model_path MIMO_UNet/mag_only/blur_field10/checkpoints/best_model.pth \
+    --model_name "MIMO-UNetPlus" \
+    --output_dir MIMO_UNet/report/MIMO_mag \
+
+echo "Visualization complete!"
