@@ -1,0 +1,34 @@
+#!/bin/bash
+
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=vis_dpt_blur
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=01:00:00
+#SBATCH --output=/home/scur0698/outputs/vis_dpt_blur.out
+
+# Load modules
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+
+# Activate conda environment
+source /home/scur0698/.bashrc
+source activate IDBlau
+
+# Add the code directory to PYTHONPATH
+export PYTHONPATH="/home/scur0698/code/DPT_blur:$PYTHONPATH"
+
+# Run visualization
+CUDA_VISIBLE_DEVICES=0 python /home/scur0698/code/DPT_blur/vis_report_dpt.py \
+    --val_dir /scratch-shared/scur0698/big_dataset_formatted/val \
+    --model_path /gpfs/home5/scur0698/code/DPT_blur/checkpoints/dpt_blur_best.pth \
+    --model_type dpt_hybrid \
+    --blur_head_type original_blur_head \
+    --crop_size 384 \
+    --output_dir /home/scur0698/code/DPT_blur/visualizations \
+    --is_dir \
+    --use_direction
+
+echo "DPT_blur visualization completed." 

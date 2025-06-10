@@ -4,7 +4,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, Subset, random_split
 from torchvision.transforms import Compose
 import torchvision.transforms.functional as TF
-import torch.nn.functional as F_nn
+import torch.nn.functional as F
 import numpy as np
 import cv2
 import os
@@ -12,6 +12,10 @@ import glob
 import argparse
 from tqdm import tqdm
 import random # For dataset filtering example
+from datetime import datetime
+import matplotlib.pyplot as plt
+from PIL import Image
+import sys
 
 # Import DPT model and transforms
 try:
@@ -27,25 +31,41 @@ from data_loader import BlurMapDataset
 # --- Import Model Creation Utility ---
 from model_utils import create_dpt_blur_model
 
+class CharbonnierLoss(nn.Module):
+    """Charbonnier Loss (L1)"""
+    def __init__(self, eps=1e-6):
+        super(CharbonnierLoss, self).__init__()
+        self.eps = eps
+        
+    def forward(self, x, y):
+        diff = x - y
+        loss = torch.sqrt(diff * diff + self.eps)
+        return loss.mean()
+
 class BlurVectorLoss(nn.Module):
     """
-    Loss function for blur vectors with configurable direction prediction.
-    When use_direction=True:
-        - Handles both direction and magnitude prediction
-        - Uses direct vector comparison for direction
-        - Uses relative/absolute error for magnitude
-    When use_direction=False:
-        - Focuses only on magnitude prediction
-        - Uses relative/absolute error for magnitude
+    Improved loss function for blur vectors combining:
+    1. Charbonnier loss for magnitude prediction
+    2. Sigmoid-transformed MSE for full vector field
+    3. Multi-scale consistency loss (if using multi-scale predictions)
     """
-    def __init__(self, use_direction=False, direction_weight=20.0, magnitude_weight=1.0, eps=1e-6):
+    def __init__(self, use_direction=False, direction_weight=1.0, magnitude_weight=1.0, 
+                 consistency_weight=0.1, eps=1e-6):
         super(BlurVectorLoss, self).__init__()
         self.use_direction = use_direction
         self.direction_weight = direction_weight if use_direction else 0.0
         self.magnitude_weight = magnitude_weight
+        self.consistency_weight = consistency_weight
         self.eps = eps
+        self.charbonnier = CharbonnierLoss(eps=eps)
         
     def forward(self, pred, target):
+        # Handle multi-scale predictions
+        if isinstance(pred, list):
+            return self._forward_multi_scale(pred, target)
+        return self._forward_single_scale(pred, target)
+    
+    def _forward_single_scale(self, pred, target):
         # Extract components
         pred_bx, pred_by, pred_mag = pred[:, 0], pred[:, 1], pred[:, 2]
         target_bx, target_by, target_mag = target[:, 0], target[:, 1], target[:, 2]
@@ -53,32 +73,24 @@ class BlurVectorLoss(nn.Module):
         # Ensure positive magnitude predictions
         pred_mag = torch.abs(pred_mag)
         
-        # Calculate magnitude error
-        abs_error = torch.abs(pred_mag - target_mag)
-        rel_error = abs_error / (target_mag + self.eps)
+        # 1. Charbonnier loss for magnitude
+        magnitude_loss = self.charbonnier(pred_mag, target_mag)
         
-        # Calculate MSE for monitoring
+        # 2. Sigmoid-transformed MSE for full vector field
+        pred_sigmoid = torch.sigmoid(pred)
+        mse_loss = F.mse_loss(pred_sigmoid, target)
+        
+        # Calculate MSE metrics for evaluation
         mse_total = torch.mean((pred - target) ** 2)
         mse_magnitude = torch.mean((pred_mag - target_mag) ** 2)
         mse_direction = torch.mean((pred_bx - target_bx) ** 2 + (pred_by - target_by) ** 2)
         mse_bx = torch.mean((pred_bx - target_bx) ** 2)
         mse_by = torch.mean((pred_by - target_by) ** 2)
         
-        # Magnitude loss with adaptive weighting
-        magnitude_loss = torch.where(
-            target_mag < 0.1,  # For small magnitudes
-            rel_error,
-            abs_error  # Use absolute error for larger magnitudes
-        )
-        
-        # Weight magnitude loss by target magnitude
-        magnitude_loss = (magnitude_loss * target_mag).mean()
-        
         # Initialize direction loss and related metrics
         direction_loss = torch.tensor(0.0, device=pred.device)
         cos_sim = torch.tensor(1.0, device=pred.device)
         angle_diff = torch.tensor(0.0, device=pred.device)
-        direction_diff = torch.tensor(0.0, device=pred.device)
         
         if self.use_direction:
             # Calculate vector statistics
@@ -91,36 +103,27 @@ class BlurVectorLoss(nn.Module):
             target_bx_norm = target_bx / target_norm
             target_by_norm = target_by / target_norm
             
-            # Direction loss using direct vector comparison
-            direction_diff = torch.sqrt(
-                (pred_bx_norm - target_bx_norm)**2 + 
-                (pred_by_norm - target_by_norm)**2 + 
-                self.eps
-            )
-            
-            # Weight direction loss by target magnitude
-            direction_loss = (direction_diff * target_mag).mean()
-            
-            # Calculate cosine similarity for monitoring
+            # Direction loss using cosine similarity
             cos_sim = (pred_bx_norm * target_bx_norm + pred_by_norm * target_by_norm).clamp(-1.0 + self.eps, 1.0 - self.eps)
+            direction_loss = (1.0 - cos_sim).mean()
             angle_diff = torch.acos(cos_sim)  # Angle difference in radians
         
         # Calculate total loss
-        total_loss = self.direction_weight * direction_loss + self.magnitude_weight * magnitude_loss
+        total_loss = (self.magnitude_weight * magnitude_loss + 
+                     0.5 * mse_loss +  # MSE component is weighted by 0.5 as per the paper
+                     self.direction_weight * direction_loss)
         
         # Calculate additional statistics
         stats = {
             'magnitude_loss': magnitude_loss.item(),
+            'mse_loss': mse_loss.item(),
             'total_loss': total_loss.item(),
-            'abs_magnitude_error': abs_error.mean().item(),
             'pred_mag_mean': pred_mag.mean().item(),
             'pred_mag_std': pred_mag.std().item(),
             'pred_mag_max': pred_mag.max().item(),
             'target_mag_mean': target_mag.mean().item(),
             'target_mag_std': target_mag.std().item(),
             'target_mag_max': target_mag.max().item(),
-            'relative_error_mean': rel_error.mean().item(),
-            'relative_error_std': rel_error.std().item(),
             'mse_total': mse_total.item(),
             'mse_magnitude': mse_magnitude.item(),
             'mse_direction': mse_direction.item(),
@@ -129,16 +132,56 @@ class BlurVectorLoss(nn.Module):
             'psnr': (10 * torch.log10(1.0 / (mse_total + self.eps))).item()
         }
         
-        # Add direction-related statistics only if using direction
         if self.use_direction:
             stats.update({
                 'direction_loss': direction_loss.item(),
                 'cosine_sim_mean': cos_sim.mean().item(),
-                'angle_diff_mean': angle_diff.mean().item(),
-                'direction_diff_mean': direction_diff.mean().item()
+                'angle_diff_mean': angle_diff.mean().item()
             })
         
         return total_loss, stats
+    
+    def _forward_multi_scale(self, preds, target):
+        """
+        Handle multi-scale predictions with consistency loss
+        preds: List of predictions at different scales
+        target: Ground truth at the finest scale
+        """
+        total_loss = 0.0
+        all_stats = []
+        
+        # Process each scale
+        for i, pred in enumerate(preds):
+            # Create downsampled target for this scale
+            if pred.shape[-2:] != target.shape[-2:]:
+                scaled_target = F.interpolate(target, size=pred.shape[-2:], 
+                                           mode='bilinear', align_corners=False)
+            else:
+                scaled_target = target
+            
+            # Calculate loss for this scale
+            scale_loss, scale_stats = self._forward_single_scale(pred, scaled_target)
+            total_loss += scale_loss
+            all_stats.append(scale_stats)
+        
+        # Add consistency loss between scales
+        consistency_loss = 0.0
+        for i in range(len(preds) - 1):
+            # Upsample coarser prediction to match finer scale
+            upsampled = F.interpolate(preds[i], size=preds[i+1].shape[-2:], 
+                                    mode='bilinear', align_corners=False)
+            # L1 loss between upsampled and finer prediction
+            consistency_loss += torch.mean(torch.abs(upsampled - preds[i+1]))
+        
+        total_loss += self.consistency_weight * consistency_loss
+        
+        # Average statistics across scales
+        avg_stats = {}
+        for key in all_stats[0].keys():
+            avg_stats[key] = sum(stat[key] for stat in all_stats) / len(all_stats)
+        avg_stats['consistency_loss'] = consistency_loss.item()
+        
+        return total_loss, avg_stats
 
 # --- Define collate_fn at the top level ---
 def collate_fn_skip_none(batch):
@@ -157,24 +200,25 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
         'val': []
     }
 
+    # Check if we're using direction prediction
+    use_direction = criterion.use_direction
+
     for epoch in range(start_epoch, epochs):
         current_epoch = epoch + 1
-        print(f"\n--- Epoch {current_epoch}/{epochs} ---")
+        print(f"\n=== Epoch {current_epoch}/{epochs} ===")
 
         # --- Training Phase ---
         model.train()
         epoch_stats = {
             'magnitude_loss': 0.0,
+            'mse_loss': 0.0,
             'total_loss': 0.0,
-            'abs_magnitude_error': 0.0,
             'pred_mag_mean': 0.0,
             'pred_mag_std': 0.0,
             'pred_mag_max': 0.0,
             'target_mag_mean': 0.0,
             'target_mag_std': 0.0,
             'target_mag_max': 0.0,
-            'relative_error_mean': 0.0,
-            'relative_error_std': 0.0,
             'mse_total': 0.0,
             'mse_magnitude': 0.0,
             'mse_direction': 0.0,
@@ -183,7 +227,15 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             'psnr': 0.0
         }
         
-        pbar_train = tqdm(train_loader, desc=f"Epoch {current_epoch} Training")
+        # Add direction-related statistics only if using direction
+        if use_direction:
+            epoch_stats.update({
+                'direction_loss': 0.0,
+                'cosine_sim_mean': 0.0,
+                'angle_diff_mean': 0.0
+            })
+        
+        pbar_train = tqdm(train_loader, desc=f"Training", leave=False)
         batch_count = 0
         for batch_idx, batch in enumerate(pbar_train):
             if batch is None:
@@ -195,17 +247,22 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             optimizer.zero_grad()
             outputs = model(inputs)
 
-            if outputs.shape[-2:] != targets.shape[-2:]:
-                 outputs_resized = F_nn.interpolate(outputs, size=targets.shape[-2:], mode='bilinear', align_corners=False)
+            if isinstance(outputs, list):
+                # Handle multi-scale outputs
+                loss, batch_stats = criterion(outputs, targets)
             else:
-                 outputs_resized = outputs
-
-            loss, batch_stats = criterion(outputs_resized, targets)
+                # Handle single-scale output
+                if outputs.shape[-2:] != targets.shape[-2:]:
+                    outputs_resized = F.interpolate(outputs, size=targets.shape[-2:], 
+                                                 mode='bilinear', align_corners=False)
+                else:
+                    outputs_resized = outputs
+                loss, batch_stats = criterion(outputs_resized, targets)
             
             if torch.isnan(loss):
-                 print(f"Warning: NaN loss encountered at Epoch {current_epoch}, Batch {batch_idx}. Skipping batch.")
-                 optimizer.zero_grad()
-                 continue
+                print(f"Warning: NaN loss encountered at Epoch {current_epoch}, Batch {batch_idx}. Skipping batch.")
+                optimizer.zero_grad()
+                continue
 
             loss.backward()
             optimizer.step()
@@ -213,120 +270,114 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             # Accumulate statistics
             batch_size = inputs.size(0)
             for key in epoch_stats:
-                epoch_stats[key] += batch_stats[key] * batch_size
+                if key in batch_stats:  # Only update if key exists in batch_stats
+                    epoch_stats[key] += batch_stats[key] * batch_size
             batch_count += batch_size
-            
-            # Update progress bar with key metrics
+
+            # Update progress bar
             pbar_train.set_postfix({
-                'total': f"{batch_stats['total_loss']:.4f}",
-                'mag': f"{batch_stats['magnitude_loss']:.4f}",
-                'mse': f"{batch_stats['mse_total']:.4f}"
+                'loss': loss.item(),
+                'mag_loss': batch_stats['magnitude_loss'],
+                'mse': batch_stats['mse_total']
             })
 
-        # Calculate and print average statistics for training
-        if batch_count > 0:
-            print("\nTraining Statistics:")
-            for key in epoch_stats:
-                epoch_stats[key] /= batch_count
-                print(f"{key}: {epoch_stats[key]:.6f}")
+        # Average statistics over the epoch
+        for key in epoch_stats:
+            epoch_stats[key] /= batch_count
+
+        # Store training statistics
         all_stats['train'].append(epoch_stats)
 
         # --- Validation Phase ---
         model.eval()
-        val_stats = {k: 0.0 for k in epoch_stats}
-        pbar_val = tqdm(val_loader, desc=f"Epoch {current_epoch} Validation")
+        val_stats = {key: 0.0 for key in epoch_stats}
         val_batch_count = 0
-        
+
         with torch.no_grad():
+            pbar_val = tqdm(val_loader, desc=f"Validation", leave=False)
             for batch_idx, batch in enumerate(pbar_val):
-                if batch is None: continue
+                if batch is None:
+                    continue
                 inputs, targets = batch
                 inputs, targets = inputs.to(device), targets.to(device)
+
                 outputs = model(inputs)
-
-                if outputs.shape[-2:] != targets.shape[-2:]:
-                     outputs_resized = F_nn.interpolate(outputs, size=targets.shape[-2:], mode='bilinear', align_corners=False)
-                else:
-                     outputs_resized = outputs
-
-                loss, batch_stats = criterion(outputs_resized, targets)
                 
-                if not torch.isnan(loss):
-                    batch_size = inputs.size(0)
-                    for key in val_stats:
-                        val_stats[key] += batch_stats[key] * batch_size
-                    val_batch_count += batch_size
-                    
-                    pbar_val.set_postfix({
-                        'total': f"{batch_stats['total_loss']:.4f}",
-                        'mag': f"{batch_stats['magnitude_loss']:.4f}",
-                        'mse': f"{batch_stats['mse_total']:.4f}"
-                    })
+                if isinstance(outputs, list):
+                    # Handle multi-scale outputs
+                    loss, batch_stats = criterion(outputs, targets)
+                else:
+                    # Handle single-scale output
+                    if outputs.shape[-2:] != targets.shape[-2:]:
+                        outputs_resized = F.interpolate(outputs, size=targets.shape[-2:], 
+                                                     mode='bilinear', align_corners=False)
+                    else:
+                        outputs_resized = outputs
+                    loss, batch_stats = criterion(outputs_resized, targets)
 
-        # Calculate and print average statistics for validation
-        if val_batch_count > 0:
-            print("\nValidation Statistics:")
-            for key in val_stats:
-                val_stats[key] /= val_batch_count
-                print(f"{key}: {val_stats[key]:.6f}")
+                # Accumulate statistics
+                batch_size = inputs.size(0)
+                for key in val_stats:
+                    if key in batch_stats:
+                        val_stats[key] += batch_stats[key] * batch_size
+                val_batch_count += batch_size
+
+                # Update progress bar
+                pbar_val.set_postfix({
+                    'loss': loss.item(),
+                    'mag_loss': batch_stats['magnitude_loss'],
+                    'mse': batch_stats['mse_total']
+                })
+
+        # Average validation statistics
+        for key in val_stats:
+            val_stats[key] /= val_batch_count
+
+        # Store validation statistics
         all_stats['val'].append(val_stats)
 
-        # Update learning rate scheduler using total loss
-        current_lr = optimizer.param_groups[0]['lr']
-        if scheduler:
-            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                 scheduler.step(val_stats['total_loss'])
-            else:
-                 scheduler.step()
-            new_lr = optimizer.param_groups[0]['lr']
-            if new_lr != current_lr:
-                 print(f"Learning rate changed to {new_lr:.8f}")
+        # Print epoch statistics
+        print(f"\nEpoch {current_epoch} Statistics:")
+        print("Training:")
+        for key, value in epoch_stats.items():
+            print(f"  {key}: {value:.6f}")
+        print("\nValidation:")
+        for key, value in val_stats.items():
+            print(f"  {key}: {value:.6f}")
 
-        # --- Checkpoint Saving --- 
-        is_best = val_stats['total_loss'] < best_val_loss
-        if is_best:
-            print(f"Validation loss improved ({best_val_loss:.6f} --> {val_stats['total_loss']:.6f}).")
+        # Save checkpoint if validation loss improved
+        if val_stats['total_loss'] < best_val_loss:
             best_val_loss = val_stats['total_loss']
+            checkpoint = {
+                'epoch': current_epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
+                'best_val_loss': best_val_loss,
+                'stats': all_stats
+            }
+            torch.save(checkpoint, os.path.join(checkpoint_dir, 'best_model.pth'))
+            print(f"\nSaved new best model with validation loss: {best_val_loss:.6f}")
 
-        # Save checkpoint with additional statistics
-        checkpoint_data = {
+        # Save regular checkpoint
+        checkpoint = {
             'epoch': current_epoch,
-            'head_state_dict': model.scratch.output_conv.state_dict(),
+            'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict() if scheduler else None,
             'best_val_loss': best_val_loss,
-            'train_stats': epoch_stats,
-            'val_stats': val_stats
+            'stats': all_stats
         }
-        if scheduler:
-            checkpoint_data['scheduler_state_dict'] = scheduler.state_dict()
+        torch.save(checkpoint, os.path.join(checkpoint_dir, f'checkpoint_epoch_{current_epoch}.pth'))
 
-        # Save latest checkpoint
-        latest_checkpoint_path = os.path.join(checkpoint_dir, 'dpt_blur_latest.pth')
-        try:
-            torch.save(checkpoint_data, latest_checkpoint_path)
-        except Exception as e:
-            print(f"Error saving latest checkpoint: {e}")
+        # Update learning rate
+        if scheduler is not None:
+            if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                scheduler.step(val_stats['total_loss'])
+            else:
+                scheduler.step()
 
-        # Save best checkpoint if loss improved
-        if is_best:
-            best_checkpoint_path = os.path.join(checkpoint_dir, 'dpt_blur_best.pth')
-            try:
-                torch.save(checkpoint_data, best_checkpoint_path)
-                print(f"Saved best model head state to {best_checkpoint_path}")
-            except Exception as e:
-                print(f"Error saving best checkpoint: {e}")
-
-    print("\nTraining finished.")
-    print(f"Final best validation loss: {best_val_loss:.6f}")
-    
-    # Print final statistics summary
-    print("\nFinal Statistics Summary:")
-    print("Training:")
-    for key in all_stats['train'][-1]:
-        print(f"{key}: {all_stats['train'][-1][key]:.6f}")
-    print("\nValidation:")
-    for key in all_stats['val'][-1]:
-        print(f"{key}: {all_stats['val'][-1][key]:.6f}")
+    return best_val_loss, all_stats
 
 # --- Main Execution ---
 if __name__ == "__main__":
@@ -342,8 +393,8 @@ if __name__ == "__main__":
     # Model Args
     parser.add_argument('--weights', type=str, default='weights/dpt_hybrid-ade20k-53898607.pt', help='Path to pre-trained DPT segmentation weights (.pt file) for backbone initialization.')
     parser.add_argument('--model_type', type=str, default='dpt_hybrid', choices=['dpt_hybrid', 'dpt_large'], help='DPT model type.')
-    parser.add_argument('--blur_head_type', type=str, default='enhanced_blur_head', 
-                        choices=['enhanced_blur_head', 'original_blur_head', 'lightweight_blur_head', 'medium_blur_head'], 
+    parser.add_argument('--blur_head_type', type=str, default='medium_blur_head', 
+                        choices=['original_blur_head', 'lightweight_blur_head', 'medium_blur_head'], 
                         help='Type of blur head architecture to use.')
     parser.add_argument('--img_size', type=int, default=384, help='Image size to resize to for DPT input.')
     parser.add_argument('--output_channels', type=int, default=3, help='Number of output channels (must be 3 for bx, by, magnitude).')
@@ -354,12 +405,22 @@ if __name__ == "__main__":
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers for DataLoader.')
     # Checkpoint Args
     parser.add_argument('--checkpoint_dir', type=str, default='./dpt_blur_checkpoints', help='Directory to save model checkpoints.')
+    parser.add_argument('--job_name', type=str, default=None, help='Name for this training job. If not provided, will use timestamp.')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint file to resume training from (.pth).')
     # Add new argument for direction prediction
     parser.add_argument('--use_direction', action='store_true',
                         help='Whether to use direction prediction in the loss function.')
 
     args = parser.parse_args()
+
+    # Create job-specific checkpoint directory
+    if args.job_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        args.job_name = f"job_{timestamp}"
+    
+    # Create full checkpoint path with job name
+    args.checkpoint_dir = os.path.join(args.checkpoint_dir, args.job_name)
+    print(f"Checkpoints will be saved to: {args.checkpoint_dir}")
 
     # Set random seed for reproducibility
     random.seed(args.split_seed)
@@ -484,7 +545,7 @@ if __name__ == "__main__":
     # Loss and Optimizer
     criterion = BlurVectorLoss(
         use_direction=args.use_direction,
-        direction_weight=20.0 if args.use_direction else 0.0,
+        direction_weight=1.0 if args.use_direction else 0.0,
         magnitude_weight=1.0
     )
     optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
@@ -496,13 +557,13 @@ if __name__ == "__main__":
             print(f"Loading checkpoint: '{args.resume}'")
             checkpoint = torch.load(args.resume, map_location=device)
             
-            # Load Head state
+            # Load Model state
             try:
-                 model.scratch.output_conv.load_state_dict(checkpoint['head_state_dict'])
+                 model.load_state_dict(checkpoint['model_state_dict'])
             except KeyError:
-                 print("Warning: Checkpoint missing 'head_state_dict'. Head weights not loaded.")
+                 print("Warning: Checkpoint missing 'model_state_dict'. Model weights not loaded.")
             except Exception as e:
-                 print(f"Error loading head state_dict: {e}")
+                 print(f"Error loading model state_dict: {e}")
 
             # Load Optimizer state
             try:
@@ -543,7 +604,7 @@ if __name__ == "__main__":
 
     # --- Start Training --- 
     print(f"Starting training from Epoch {start_epoch + 1}...")
-    train_model(
+    best_val_loss, all_stats = train_model(
         model,
         train_loader,
         val_loader,
@@ -572,11 +633,12 @@ if __name__ == "__main__":
         'target_mag_max': 0.0,
         'relative_error_mean': 0.0,
         'relative_error_std': 0.0,
+        'mse_total': 0.0,
         'mse_magnitude': 0.0,
-        'psnr_magnitude': 0.0
+        'psnr': 0.0
     }
     
-    # Add direction-related statistics if using direction
+    # Add direction-related statistics only if using direction
     if args.use_direction:
         test_stats.update({
             'direction_loss': 0.0,
@@ -585,8 +647,7 @@ if __name__ == "__main__":
             'direction_diff_mean': 0.0,
             'mse_direction': 0.0,
             'mse_bx': 0.0,
-            'mse_by': 0.0,
-            'psnr_direction': 0.0
+            'mse_by': 0.0
         })
     
     test_batch_count = 0
@@ -625,7 +686,8 @@ if __name__ == "__main__":
             
             batch_size = inputs.size(0)
             for key in test_stats:
-                test_stats[key] += batch_stats[key] * batch_size
+                if key in batch_stats:  # Only update if key exists in batch_stats
+                    test_stats[key] += batch_stats[key] * batch_size
             test_batch_count += batch_size
 
     # Calculate and print average statistics for test set
